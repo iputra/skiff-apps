@@ -95,4 +95,10 @@ yarn workspace skemail-server codegen     # setelah schema.graphql berubah
 - Script build memanggil workspace `@skiff-org/skiff-crypto` yang tidak ada (namanya `skiff-crypto`).
 - Codegen `skiff-graphql` membuat ulang `completeSchema.graphql` dari `supergraph.graphql` yang sudah usang. Akibatnya `skiff-front-graphql` gagal divalidasi.
 
+Selain itu, **dev server `skemail-web` sendiri belum bisa dikompilasi** di repo ini:
+- `@tiptap/core@2.0.3` membutuhkan peer dependency `@tiptap/pm`, yang sama sekali tidak ada di `yarn.lock`.
+- Bundle ESM `nightwatch-ui` tidak bisa di-parse oleh konfigurasi webpack skemail-web.
+
+Karena itu, server ini baru diverifikasi lewat test (memakai teks operasi persis milik frontend dan kripto asli) dan lewat HTTP sungguhan (login SRP, cookie, request batch, upload multipart, preflight CORS). Uji lewat UI menunggu build frontend diperbaiki.
+
 Bundle JS tiap library tetap bisa dibuat dengan `yarn node build.js` di folder masing-masing. Langkah `tsc` (file `.d.ts`) gagal, karena itu `tsconfig.json` server memetakan `skiff-crypto` / `skiff-graphql` / `skiff-utils` langsung ke source TS-nya. **Jangan commit** perubahan `libs/skiff-graphql/src/completeSchema.graphql` atau `types.ts` yang muncul setelah menjalankan `yarn build:lib`.

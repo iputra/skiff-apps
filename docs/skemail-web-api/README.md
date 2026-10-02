@@ -93,6 +93,8 @@ Frontend juga memanggil beberapa URL di luar `/graphql`:
 
 ## Prioritas implementasi (saran)
 
+Tahap 1 dan 2 sudah diimplementasikan di [`skemail-server/`](../../skemail-server/README.md). Lampiran diunduh lewat link bertanda tangan `GET /attachments/:id`.
+
 Kalau tujuannya inbox yang bisa dipakai, kerjakan bertahap. Nama di bawah adalah nama operasi (lihat `operations.md`). Nama root field ada dalam kurung jika berbeda.
 
 **Tahap 1: login dan membaca email**
