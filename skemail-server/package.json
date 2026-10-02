@@ -1,0 +1,42 @@
+{
+  "name": "skemail-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Skeleton GraphQL backend for skemail-web, built from docs/skemail-web-api/schema.graphql",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "seed": "tsx scripts/seed.ts",
+    "codegen": "graphql-codegen --config codegen.yml",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@apollo/server": "^4.10.0",
+    "@graphql-tools/schema": "^10.0.2",
+    "@graphql-tools/utils": "^10.0.13",
+    "better-sqlite3": "^9.4.3",
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "graphql": "16.8.1",
+    "graphql-upload-minimal": "^1.6.1",
+    "secure-remote-password": "^0.3.1",
+    "tweetnacl": "^1.0.3"
+  },
+  "devDependencies": {
+    "@graphql-codegen/cli": "^2.6.2",
+    "@graphql-codegen/typescript": "^2.4.5",
+    "@graphql-codegen/typescript-resolvers": "^2.5.2",
+    "@types/better-sqlite3": "^7.6.9",
+    "@types/cookie-parser": "^1.4.6",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "20.9.0",
+    "skiff-crypto": "workspace:libs/skiff-crypto",
+    "skiff-front-graphql": "workspace:libs/skiff-front-graphql",
+    "tsx": "^4.7.0",
+    "typescript": "^5.0.0",
+    "vitest": "^1.2.0"
+  }
+}

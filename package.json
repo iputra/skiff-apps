@@ -2,6 +2,7 @@
   "workspaces": [
     "libs",
     "skemail-web",
+    "skemail-server",
     "calendar-web",
     "skiff-pages-drive",
     "skiff-calendar"
@@ -9,7 +10,9 @@
   "scripts": {
     "build:lib": "yarn workspace libs build",
     "dev": "yarn workspace skemail-web dev",
-    "spec:skemail-api": "node scripts/skemail-api-spec/generate.js"
+    "spec:skemail-api": "node scripts/skemail-api-spec/generate.js",
+    "dev:server": "yarn workspace skemail-server dev",
+    "seed:server": "yarn workspace skemail-server seed"
   },
   "devDependencies": {
     "@apollo/protobufjs": "^1.2.2",
