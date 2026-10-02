@@ -51,7 +51,9 @@ export async function ingestMime(
   db: DB,
   config: Config,
   raw: Buffer,
-  envelopeRecipients: string[]
+  envelopeRecipients: string[],
+  /** System label for the new email: INBOX, or SPAM when the inbound filter flagged it. */
+  label: 'INBOX' | 'SPAM' = 'INBOX'
 ): Promise<IngestResult> {
   const recipients = [...new Set(envelopeRecipients.map(normalizeAddress))];
   const users = new Map<string, { publicKey: PublicKey; address: string }>();
@@ -144,7 +146,7 @@ export async function ingestMime(
         createdAt,
         messageId
       },
-      { addLabels: ['INBOX'], read: false },
+      { addLabels: [label], read: false },
       attachments
     );
   }

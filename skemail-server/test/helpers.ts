@@ -1,11 +1,26 @@
 import type { ApolloServer } from '@apollo/server';
+import fs from 'fs';
+import { DefinitionNode, FragmentDefinitionNode, Kind, OperationDefinitionNode, parse, print, visit } from 'graphql';
+import { Upload } from 'graphql-upload-minimal';
+import path from 'path';
+import { createRawJSONDatagram, encryptSessionKey, encryptSymmetric, generateSymmetricKey } from 'skiff-crypto';
+import { Readable } from 'stream';
 
+import { createAccountMaterial, PrivateUserData } from '../scripts/clientCrypto';
 import { createApolloServer } from '../src/app';
 import { Config, loadConfig } from '../src/config';
 import { Context } from '../src/context';
 import { DB, openDatabase } from '../src/db/db';
 import { createUser, UserRow } from '../src/db/users';
-import { createAccountMaterial, PrivateUserData } from '../scripts/clientCrypto';
+import {
+  AttachmentDatagram,
+  AttachmentMetadataDatagram,
+  encrypt,
+  MailHtmlDatagram,
+  MailSubjectDatagram,
+  MailTextAsHTMLDatagram,
+  MailTextDatagram
+} from '../src/mail/datagrams';
 
 export interface TestEnv {
   db: DB;
@@ -59,11 +74,6 @@ export async function run(
 // The exact operations skemail-web sends (docs/skemail-web-api/operations.graphql)
 // ---------------------------------------------------------------------------
 
-import fs from 'fs';
-import path from 'path';
-
-import { DefinitionNode, FragmentDefinitionNode, Kind, OperationDefinitionNode, parse, print, visit } from 'graphql';
-
 const OPERATIONS_FILE = path.resolve(__dirname, '../../docs/skemail-web-api/operations.graphql');
 const opsDoc = parse(fs.readFileSync(OPERATIONS_FILE, 'utf8'));
 const fragmentDefs = new Map(
@@ -97,4 +107,96 @@ export function documentFor(op: OperationDefinitionNode): string {
     });
   collect(op);
   return [op, ...needed.values()].map((d) => print(d)).join('\n\n');
+}
+
+export const TextDatagram = createRawJSONDatagram<{ text: string }>('ddl://skemail-server/test/Text');
+
+/** Encrypts a message the way the client does: one session key, wrapped once per participant. */
+export function encryptedMessage(from: TestUser, to: TestUser[], subject: string, body: string) {
+  const sessionKey = generateSymmetricKey();
+  const enc = (text: string) => ({ encryptedData: encryptSymmetric({ text }, sessionKey, TextDatagram) });
+  const wrapFor = (user: TestUser) => {
+    const { encryptedKey, encryptedBy } = encryptSessionKey(
+      sessionKey,
+      from.privateUserData.privateKey,
+      from.publicKey,
+      user.publicKey
+    );
+    return { encryptedSessionKey: encryptedKey, encryptedBy };
+  };
+  return {
+    from: { address: from.row.username, name: 'Sender', encryptedSessionKey: wrapFor(from) },
+    to: to.map((u) => ({ address: u.row.username, encryptedSessionKey: wrapFor(u) })),
+    cc: [],
+    bcc: [],
+    attachments: [],
+    captchaToken: '',
+    rawSubject: '',
+    encryptedSubject: enc(subject),
+    encryptedText: enc(body),
+    encryptedHtml: enc(`<p>${body}</p>`),
+    encryptedTextAsHtml: enc(`<p>${body}</p>`),
+    encryptedTextSnippet: enc(body.slice(0, 20))
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Messages in skemail-web's real encrypted formats, including mail to other servers
+// ---------------------------------------------------------------------------
+
+function uploadOf(content: string) {
+  const upload = new Upload();
+  // `resolve` exists at runtime but is missing from graphql-upload-minimal's type definitions.
+  (upload as unknown as { resolve(file: unknown): void }).resolve({
+    filename: 'blob',
+    mimetype: 'application/octet-stream',
+    encoding: '7bit',
+    createReadStream: () => Readable.from([Buffer.from(content)])
+  });
+  return upload;
+}
+
+/** A message encrypted exactly like skemail-web does, including the copy of the key for the server. */
+export async function clientMessage(env: TestEnv, from: TestUser, to: string[], subject: string, body: string) {
+  const serverKey = (await run(env, '{ decryptionServicePublicKey }', {}, from.row)).data!.decryptionServicePublicKey;
+  const sessionKey = generateSymmetricKey();
+  const wrap = (key: { key: string }) => {
+    const w = encryptSessionKey(sessionKey, from.privateUserData.privateKey, from.publicKey, key);
+    return { encryptedSessionKey: w.encryptedKey, encryptedBy: w.encryptedBy };
+  };
+  const fileContent = Buffer.from('hello attachment').toString('base64');
+  return {
+    from: { address: from.row.username, name: 'Alice', encryptedSessionKey: wrap(from.publicKey) },
+    to: to.map((address) => ({ address })),
+    cc: [],
+    bcc: [],
+    attachments: [
+      {
+        encryptedContent: {
+          encryptedFile: uploadOf(encrypt(AttachmentDatagram, { content: fileContent }, sessionKey))
+        },
+        encryptedMetadata: {
+          encryptedData: encrypt(
+            AttachmentMetadataDatagram,
+            {
+              contentType: 'text/plain',
+              contentDisposition: 'attachment; filename="note.txt"',
+              filename: 'note.txt',
+              checksum: '',
+              size: 16,
+              contentId: '<abc@skiff>'
+            },
+            sessionKey
+          )
+        }
+      }
+    ],
+    captchaToken: '',
+    rawSubject: '',
+    encryptedSubject: { encryptedData: encrypt(MailSubjectDatagram, { subject }, sessionKey) },
+    encryptedText: { encryptedData: encrypt(MailTextDatagram, { text: body }, sessionKey) },
+    encryptedHtml: { encryptedData: encrypt(MailHtmlDatagram, { html: `<p>${body}</p>` }, sessionKey) },
+    encryptedTextAsHtml: { encryptedData: encrypt(MailTextAsHTMLDatagram, { textAsHTML: body }, sessionKey) },
+    externalEncryptedSessionKey: wrap(serverKey)
+  };
 }

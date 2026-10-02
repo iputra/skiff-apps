@@ -28,7 +28,8 @@ const TextPreview: PreviewComponent = ({ data }: PreviewComponentProps) => {
 
   useEffect(() => {
     const fetchHtml = async () => {
-      if (data.startsWith('blob:')) {
+      // Drive passes blob: URLs; mail attachments are passed as data: URLs.
+      if (data.startsWith('blob:') || data.startsWith('data:')) {
         const res = await fetch(data);
         const blob = await res.blob();
         const textVal = await blob.text();

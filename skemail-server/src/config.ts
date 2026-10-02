@@ -2,6 +2,8 @@ import { randomBytes } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
+import type { SendLimits } from './limits';
+
 export interface Config {
   port: number;
   /** Base URL the browser uses to reach this server; used to build attachment download links. */
@@ -13,6 +15,7 @@ export interface Config {
   /** HMAC key for signed attachment download links. */
   linkSecret: string;
   mail: MailConfig;
+  sendLimits: SendLimits;
 }
 
 export interface MailConfig {
@@ -35,6 +38,19 @@ export interface MailConfig {
   mxOverrides: Record<string, { host: string; port: number }>;
   dkimSelector: string;
   dkimKeyFile: string;
+  /** DNS blocklists checked for connecting IPs; their verdict rejects the connection. */
+  dnsblZones: string[];
+  /** Messages accepted per remote IP per minute. */
+  inboundPerIpPerMinute: number;
+  /** Optional rspamd controller URL (e.g. http://127.0.0.1:11333) for content-based spam filtering. */
+  rspamdUrl?: string;
+  /** DNS-over-HTTPS resolver that validates DNSSEC, used for DANE; empty disables DANE. */
+  daneDohUrl: string;
+  /** Honour recipient domains' MTA-STS policies. */
+  mtaStsEnabled: boolean;
+  /** Our own MTA-STS policy, served at /.well-known/mta-sts.txt. */
+  mtaStsMode: 'enforce' | 'testing' | 'none';
+  mtaStsMaxAge: number;
 }
 
 function parseMxOverrides(value = ''): MailConfig['mxOverrides'] {
@@ -66,7 +82,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     cookieSecure: env.COOKIE_SECURE === 'true',
     // A random secret means links stop working after a restart, which is fine for local development.
     linkSecret: env.LINK_SECRET ?? randomBytes(32).toString('hex'),
-    mail: loadMailConfig(env, dataDir)
+    mail: loadMailConfig(env, dataDir),
+    sendLimits: {
+      maxRecipientsPerMessage: Number(env.SEND_MAX_RECIPIENTS ?? 50),
+      perHour: Number(env.SEND_LIMIT_PER_HOUR ?? 50),
+      perDay: Number(env.SEND_LIMIT_PER_DAY ?? 200)
+    }
   };
 }
 
@@ -87,7 +108,17 @@ function loadMailConfig(env: NodeJS.ProcessEnv, dataDir: string): MailConfig {
     outboundPort: Number(env.OUTBOUND_SMTP_PORT ?? 25),
     mxOverrides: parseMxOverrides(env.MX_OVERRIDES),
     dkimSelector: env.DKIM_SELECTOR ?? 'skemail',
-    dkimKeyFile: env.DKIM_KEY_FILE ?? path.join(dataDir, 'dkim-private.pem')
+    dkimKeyFile: env.DKIM_KEY_FILE ?? path.join(dataDir, 'dkim-private.pem'),
+    dnsblZones: (env.DNSBL_ZONES ?? 'zen.spamhaus.org')
+      .split(',')
+      .map((z) => z.trim())
+      .filter(Boolean),
+    inboundPerIpPerMinute: Number(env.INBOUND_PER_IP_PER_MINUTE ?? 30),
+    rspamdUrl: env.RSPAMD_URL || undefined,
+    daneDohUrl: env.DANE_DOH_URL ?? 'https://cloudflare-dns.com/dns-query',
+    mtaStsEnabled: env.MTA_STS_ENABLED !== 'false',
+    mtaStsMode: (env.MTA_STS_MODE as MailConfig['mtaStsMode']) ?? 'testing',
+    mtaStsMaxAge: Number(env.MTA_STS_MAX_AGE ?? 604800)
   };
 }
 

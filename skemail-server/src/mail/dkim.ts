@@ -19,3 +19,19 @@ export function dkimDnsValue(privateKeyPem: string): string {
   const der = createPublicKey(privateKeyPem).export({ type: 'spki', format: 'der' });
   return `v=DKIM1; k=rsa; p=${der.toString('base64')}`;
 }
+
+/**
+ * Returns the message with a DKIM-Signature header prepended. mailauth's bundled typings describe a flat options
+ * object, but the implementation only signs with `signatureData` (flat options silently produce no signature),
+ * so the call is made here once, with a check.
+ */
+export async function dkimSignMessage(raw: Buffer, signer: { domain: string; selector: string; privateKey: string }) {
+  const { dkimSign } = await import('mailauth');
+  const result = (await dkimSign(raw, {
+    signatureData: [{ signingDomain: signer.domain, selector: signer.selector, privateKey: signer.privateKey }]
+  } as never)) as unknown as { signatures: string; errors: unknown[] };
+  if (!result.signatures.startsWith('DKIM-Signature:')) {
+    throw new Error(`DKIM signing failed: ${JSON.stringify(result.errors)}`);
+  }
+  return Buffer.concat([Buffer.from(result.signatures), raw]);
+}

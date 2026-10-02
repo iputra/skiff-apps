@@ -1,45 +1,16 @@
 import { describe, expect, it } from 'vitest';
+import { decryptSessionKey, decryptSymmetric } from 'skiff-crypto';
+
 import {
-  createRawJSONDatagram,
-  decryptSessionKey,
-  decryptSymmetric,
-  encryptSessionKey,
-  encryptSymmetric,
-  generateSymmetricKey
-} from 'skiff-crypto';
-
-import { addUser, clientOperation, createTestEnv, run, TestEnv, TestUser } from './helpers';
-
-const TextDatagram = createRawJSONDatagram<{ text: string }>('ddl://skemail-server/test/Text');
-
-/** Encrypts a message the way the client does: one session key, wrapped once per participant. */
-function encryptedMessage(from: TestUser, to: TestUser[], subject: string, body: string) {
-  const sessionKey = generateSymmetricKey();
-  const enc = (text: string) => ({ encryptedData: encryptSymmetric({ text }, sessionKey, TextDatagram) });
-  const wrapFor = (user: TestUser) => {
-    const { encryptedKey, encryptedBy } = encryptSessionKey(
-      sessionKey,
-      from.privateUserData.privateKey,
-      from.publicKey,
-      user.publicKey
-    );
-    return { encryptedSessionKey: encryptedKey, encryptedBy };
-  };
-  return {
-    from: { address: from.row.username, name: 'Sender', encryptedSessionKey: wrapFor(from) },
-    to: to.map((u) => ({ address: u.row.username, encryptedSessionKey: wrapFor(u) })),
-    cc: [],
-    bcc: [],
-    attachments: [],
-    captchaToken: '',
-    rawSubject: '',
-    encryptedSubject: enc(subject),
-    encryptedText: enc(body),
-    encryptedHtml: enc(`<p>${body}</p>`),
-    encryptedTextAsHtml: enc(`<p>${body}</p>`),
-    encryptedTextSnippet: enc(body.slice(0, 20))
-  };
-}
+  addUser,
+  clientOperation,
+  createTestEnv,
+  encryptedMessage,
+  run,
+  TestEnv,
+  TestUser,
+  TextDatagram
+} from './helpers';
 
 const inbox = async (env: TestEnv, user: TestUser, label: string) => {
   const { data, errors } = await run(env, clientOperation('mailbox'), { request: { label, limit: 20 } }, user.row);

@@ -8,6 +8,7 @@ import { graphqlUploadExpress } from 'graphql-upload-minimal';
 import { Config } from './config';
 import { Context, resolveUser, USER_ID_HEADER } from './context';
 import { DB } from './db/db';
+import { mtaStsPolicyText } from './mail/published';
 import { attachmentDownloadHandler } from './resolvers/attachments';
 import { buildSchema } from './schema';
 
@@ -32,6 +33,8 @@ export async function createApp(db: DB, config: Config) {
   app.use(cookieParser());
   app.get('/healthz', (_req, res) => res.json({ ok: true }));
   app.get('/attachments/:id', attachmentDownloadHandler(db, config));
+  // MTA-STS policy (RFC 8461); must be reachable as https://mta-sts.<domain>/.well-known/mta-sts.txt.
+  app.get('/.well-known/mta-sts.txt', (_req, res) => res.type('text/plain').send(mtaStsPolicyText(config.mail)));
   app.use(
     '/graphql',
     graphqlUploadExpress({ maxFileSize: MAX_UPLOAD_BYTES, maxFiles: 20 }),

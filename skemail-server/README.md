@@ -31,7 +31,7 @@ Log ini bisa dipakai sebagai daftar pekerjaan berikutnya.
 
 ## Menjalankan
 
-Langkah 1–2 cukup sekali.
+Butuh **Node.js 22** (minimal 20.18, karena `mailauth`). Langkah 1–2 cukup sekali.
 
 ```bash
 # 1. Dependency monorepo
@@ -110,11 +110,55 @@ swaks --server localhost:2525 --from teman@external.test --to alice@skiff.local 
 3. **DNS.** Jalankan `yarn workspace skemail-server dns <IP-server>` untuk mencetak record yang perlu dibuat: `A` untuk host mail, `MX`, `SPF`, `DKIM` (kunci dibuat otomatis di `data/dkim-private.pem`), dan `DMARC`.
 4. **Uji.** Kirim email ke alamat dari [mail-tester.com](https://www.mail-tester.com) untuk memeriksa SPF, DKIM, DMARC, PTR, dan blacklist. Lalu uji kirim dan terima ke akun Gmail.
 
+### Penyaringan email masuk
+
+Setiap email masuk melewati beberapa pemeriksaan (`src/mail/filter.ts`, `src/mail/inbound.ts`):
+
+| Pemeriksaan | Hasil |
+|---|---|
+| IP pengirim terdaftar di DNSBL (`DNSBL_ZONES`, default `zen.spamhaus.org`) | koneksi ditolak (`554`) |
+| Lebih dari `INBOUND_PER_IP_PER_MINUTE` pesan per menit dari satu IP | ditunda (`421`) |
+| DMARC gagal, dan domain pengirim memasang `p=reject` | ditolak (`550`) |
+| DMARC gagal dengan `p=quarantine`, atau SPF gagal tanpa tanda tangan DKIM yang valid | masuk folder **Spam** |
+| rspamd (kalau `RSPAMD_URL` diisi) memutuskan `reject` / `greylist` / `add header` | ditolak / ditunda / **Spam** |
+
+SPF, DKIM, DMARC, dan ARC diperiksa dengan [mailauth](https://github.com/postalsys/mailauth). Untuk filter konten (bayesian, URL blocklist, dan sebagainya), jalankan [rspamd](https://rspamd.com) di samping server dan isi `RSPAMD_URL=http://127.0.0.1:11333`.
+
+**Penting soal Spamhaus:** Spamhaus menolak query yang datang lewat resolver publik besar (8.8.8.8, 1.1.1.1). Jawaban penolakan itu dianggap "tidak terdaftar", jadi DNSBL diam-diam tidak bekerja. Jalankan resolver lokal (misalnya `unbound`) di server, atau pakai zona Spamhaus DQS dengan kunci Anda sendiri.
+
+### Batas kirim per akun
+
+Batas ini mencegah akun yang dibobol dipakai menyebar spam (`src/limits.ts`). Yang dihitung adalah jumlah penerima (to + cc + bcc), baik lokal maupun luar, dalam jendela waktu bergulir:
+
+| Variabel | Default | Kalau terlampaui |
+|---|---|---|
+| `SEND_MAX_RECIPIENTS` | 50 per email | email ditolak |
+| `SEND_LIMIT_PER_HOUR` | 50 per jam | toast "Sending too fast…" (`RATE_LIMIT_EXCEEDED`) |
+| `SEND_LIMIT_PER_DAY` | 200 per 24 jam (sama dengan batas akun gratis Skiff) | modal batas pesan bawaan skemail-web (`MESSAGE_LIMIT`) |
+
+### TLS antar mail server: MTA-STS dan DANE
+
+**Saat mengirim**, server memakai kebijakan terkuat yang dipasang domain penerima (`src/mail/tls-policy.ts`):
+
+1. **DANE.** Kalau MX penerima punya record TLSA di zona yang ditandatangani DNSSEC, STARTTLS wajib dan sertifikatnya harus cocok dengan TLSA:
+   - usage 3 (DANE-EE) mengunci sertifikat atau kunci server;
+   - usage 2 (DANE-TA) mengunci trust anchor di rantai sertifikat, ditambah pemeriksaan nama host.
+
+   Node tidak bisa memvalidasi DNSSEC sendiri, jadi lookup MX/TLSA memakai resolver DNS-over-HTTPS yang memvalidasi DNSSEC (`DANE_DOH_URL`, default Cloudflare) dan menghormati flag AD-nya.
+2. **MTA-STS.** Kalau domain penerima memasang policy `enforce`, server hanya memakai host MX yang terdaftar di policy, STARTTLS wajib, dan sertifikat harus tepercaya publik untuk nama MX itu. Policy di-cache sesuai `max_age`. Mode `testing` hanya mencatat pelanggaran ke log.
+3. **Selain itu** dipakai STARTTLS oportunistik (dipakai kalau tersedia).
+
+Kalau syarat TLS tidak terpenuhi, host MX berikutnya dicoba, lalu email dicoba ulang nanti. Email tidak pernah dikirim tanpa enkripsi kalau policy mewajibkan TLS.
+
+**Saat menerima**, kita memasang hal yang sama untuk domain sendiri. `yarn workspace skemail-server dns <IP>` mencetak record-nya:
+- `_mta-sts.<domain>` (TXT) dan `mta-sts.<domain>` (CNAME ke host mail). Policy-nya disajikan server di `/.well-known/mta-sts.txt`, dan harus bisa diakses lewat **HTTPS** di `https://mta-sts.<domain>/`, misalnya lewat reverse proxy. Mulai dengan `MTA_STS_MODE=testing`, lalu ganti ke `enforce` setelah STARTTLS di port 25 stabil.
+- `_smtp._tls.<domain>` (TXT) untuk laporan TLS-RPT.
+- `_25._tcp.<host mail>` (TLSA), dicetak kalau `SMTP_TLS_CERT_FILE` diisi. Record ini **hanya berguna kalau zona DNS Anda ditandatangani DNSSEC**. Karena TLSA mengunci kunci sertifikat, perpanjang sertifikat dengan kunci yang sama (`certbot --reuse-key`), atau terbitkan record baru sebelum sertifikat diganti.
+
 ### Belum ada di mail server
-- **Pemeriksaan email masuk.** SPF, DKIM, dan DMARC pengirim belum diverifikasi, dan belum ada filter spam, greylisting, atau rate limit. Email masuk saat ini diterima apa adanya.
-- MTA-STS, DANE, dan laporan TLS.
-- Dukungan IPv6 khusus. Pengiriman memakai apa yang dikembalikan DNS, jadi pastikan IPv6 juga punya PTR, atau nonaktifkan IPv6 keluar.
-- Batas kirim per user, untuk mencegah akun yang dibobol dipakai mengirim spam.
+- **Greylisting**, dan reputasi pengirim di luar DNSBL/rspamd.
+- **Mengirim laporan DMARC/TLS-RPT ke domain lain.** Laporan yang masuk ke `postmaster@` hanya tersimpan sebagai email biasa.
+- **Dukungan IPv6 khusus.** Pengiriman memakai apa yang dikembalikan DNS, jadi pastikan IPv6 juga punya PTR, atau nonaktifkan IPv6 keluar.
 
 ## Cara kerja
 
@@ -126,12 +170,14 @@ src/
   context.ts        sesi: cookie skiff_session_<userID> + header x-skiff-userid
   scalars.ts        Date, PublicKey, JSON, Void, Upload
   resolvers/        auth, user, mailbox, send, drafts, contacts, attachments
-  mail/             inbound (SMTP/MX), ingest (MIME -> ciphertext), outbound (antrean, MX, DKIM, bounce),
-                    datagrams (format terenkripsi skemail-web), dkim
+  limits.ts         batas kirim per akun
+  mail/             inbound (SMTP/MX), filter (SPF/DKIM/DMARC, DNSBL, rspamd), ingest (MIME -> ciphertext),
+                    outbound (antrean, MX, DKIM, bounce), tls-policy (DANE, MTA-STS), published (policy &
+                    record DNS milik kita), datagrams (format terenkripsi skemail-web), dkim
   db/               SQLite (better-sqlite3), migrasi SQL, query
 scripts/
   seed.ts           membuat akun seperti alur signup frontend
-  dns.ts            mencetak record DNS (MX, SPF, DKIM, DMARC) untuk MAIL_DOMAINS
+  dns.ts            mencetak record DNS (MX, SPF, DKIM, DMARC, MTA-STS, TLS-RPT, TLSA) untuk MAIL_DOMAINS
   clientCrypto.ts   kripto sisi klien (seed dan test), memakai libs/skiff-crypto
 test/               vitest
 ```
@@ -156,6 +202,16 @@ yarn workspace skemail-server codegen     # setelah schema.graphql berubah
   - Retry untuk server yang tidak bisa dihubungi, dan bounce untuk penolakan 5xx serta user lokal yang tidak ada.
   - Email masuk terenkripsi untuk penerima dan masuk ke thread yang benar, lengkap dengan lampiran.
   - Penolakan relay (`554`) dan user tidak dikenal (`550`).
+- `test/inbound-filter.test.ts` memakai DNS palsu dan menguji:
+  - email lolos SPF, DKIM, dan DMARC masuk inbox;
+  - pemalsuan ditolak oleh DMARC `p=reject`;
+  - `p=quarantine` dan SPF gagal masuk Spam;
+  - DNSBL, batas per IP, serta keputusan rspamd.
+- `test/limits.test.ts` menguji batas per jam, per hari, dan per email.
+- `test/tls-policy.test.ts` memakai server tujuan dengan STARTTLS dan menguji:
+  - DANE-EE dan DANE-TA cocok;
+  - sertifikat tidak cocok, server tanpa STARTTLS, dan TLSA tanpa DNSSEC (diabaikan);
+  - MTA-STS `enforce` dan `testing`, cache policy, serta policy milik kita sendiri.
 - `test/contract.test.ts` menjalankan **setiap** operasi skemail-web (203) dengan variabel minimal, lalu memastikan tidak ada respons yang melanggar skema atau resolver yang crash.
 
 ## Catatan build library

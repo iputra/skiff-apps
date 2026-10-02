@@ -3,13 +3,11 @@ import { AddressInfo } from 'net';
 import os from 'os';
 import path from 'path';
 
-import { Upload } from 'graphql-upload-minimal';
 import { dkimVerify } from 'mailauth/lib/dkim/verify';
 import { simpleParser } from 'mailparser';
 import nodemailer from 'nodemailer';
 import { decryptSessionKey, encryptSessionKey, generateSymmetricKey } from 'skiff-crypto';
 import { SMTPServer } from 'smtp-server';
-import { Readable } from 'stream';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { getAttachment } from '../src/db/mail';
@@ -25,8 +23,16 @@ import {
 } from '../src/mail/datagrams';
 import { createInboundServer } from '../src/mail/inbound';
 import { dkimDnsValue, loadDkimKey } from '../src/mail/dkim';
-import { processOutboundQueue } from '../src/mail/outbound';
-import { addUser, clientOperation, createTestEnv, run, TestEnv, TestUser } from './helpers';
+import { OutboundDeps, processOutboundQueue } from '../src/mail/outbound';
+import { addUser, clientMessage, clientOperation, createTestEnv, run, TestEnv, TestUser } from './helpers';
+
+/** No DNS at all: SPF/DKIM/DMARC come out as `none`, which the inbound filter accepts. */
+const noDns = async () => {
+  throw Object.assign(new Error('not found'), { code: 'ENOTFOUND' });
+};
+
+/** No DANE and no MTA-STS: plain opportunistic TLS, without touching the network. */
+const offline: OutboundDeps = { secureResolver: null, mtaSts: async () => ({ id: false, mode: 'none' }) };
 
 const closers: (() => Promise<void> | void)[] = [];
 afterEach(async () => {
@@ -80,63 +86,6 @@ async function mailEnv(externalPort?: number): Promise<TestEnv> {
   return env;
 }
 
-function uploadOf(content: string) {
-  const upload = new Upload();
-  // `resolve` exists at runtime but is missing from graphql-upload-minimal's type definitions.
-  (upload as unknown as { resolve(file: unknown): void }).resolve({
-    filename: 'blob',
-    mimetype: 'application/octet-stream',
-    encoding: '7bit',
-    createReadStream: () => Readable.from([Buffer.from(content)])
-  });
-  return upload;
-}
-
-/** A message encrypted exactly like skemail-web does, including the copy of the key for the server. */
-async function clientMessage(env: TestEnv, from: TestUser, to: string[], subject: string, body: string) {
-  const serverKey = (await run(env, '{ decryptionServicePublicKey }', {}, from.row)).data!.decryptionServicePublicKey;
-  const sessionKey = generateSymmetricKey();
-  const wrap = (key: { key: string }) => {
-    const w = encryptSessionKey(sessionKey, from.privateUserData.privateKey, from.publicKey, key);
-    return { encryptedSessionKey: w.encryptedKey, encryptedBy: w.encryptedBy };
-  };
-  const fileContent = Buffer.from('hello attachment').toString('base64');
-  return {
-    from: { address: from.row.username, name: 'Alice', encryptedSessionKey: wrap(from.publicKey) },
-    to: to.map((address) => ({ address })),
-    cc: [],
-    bcc: [],
-    attachments: [
-      {
-        encryptedContent: {
-          encryptedFile: uploadOf(encrypt(AttachmentDatagram, { content: fileContent }, sessionKey))
-        },
-        encryptedMetadata: {
-          encryptedData: encrypt(
-            AttachmentMetadataDatagram,
-            {
-              contentType: 'text/plain',
-              contentDisposition: 'attachment; filename="note.txt"',
-              filename: 'note.txt',
-              checksum: '',
-              size: 16,
-              contentId: '<abc@skiff>'
-            },
-            sessionKey
-          )
-        }
-      }
-    ],
-    captchaToken: '',
-    rawSubject: '',
-    encryptedSubject: { encryptedData: encrypt(MailSubjectDatagram, { subject }, sessionKey) },
-    encryptedText: { encryptedData: encrypt(MailTextDatagram, { text: body }, sessionKey) },
-    encryptedHtml: { encryptedData: encrypt(MailHtmlDatagram, { html: `<p>${body}</p>` }, sessionKey) },
-    encryptedTextAsHtml: { encryptedData: encrypt(MailTextAsHTMLDatagram, { textAsHTML: body }, sessionKey) },
-    externalEncryptedSessionKey: wrap(serverKey)
-  };
-}
-
 const inbox = async (env: TestEnv, user: TestUser, label = 'INBOX') =>
   (await run(env, clientOperation('mailbox'), { request: { label, limit: 20 } }, user.row)).data!.mailbox
     .threads as any[];
@@ -174,7 +123,7 @@ describe('mail to other servers', () => {
     const sent = await run(env, clientOperation('sendMessage'), { request: message }, alice.row);
     expect(sent.errors).toBeUndefined();
 
-    await processOutboundQueue(env.db, env.config, () => undefined);
+    await processOutboundQueue(env.db, env.config, () => undefined, offline);
     expect(external.received).toHaveLength(1);
     const { from, to, raw } = external.received[0];
     expect(from).toBe('alice@skiff.local');
@@ -216,7 +165,7 @@ describe('mail to other servers', () => {
     const down = await clientMessage(env, alice, ['someone@down.test'], 'To a down server', 'x');
     await run(env, clientOperation('sendMessage'), { request: down }, alice.row);
 
-    await processOutboundQueue(env.db, env.config, () => undefined);
+    await processOutboundQueue(env.db, env.config, () => undefined, offline);
     const jobs = env.db.prepare('SELECT domain, status, attempts FROM outbound_queue ORDER BY domain').all();
     expect(jobs).toEqual([
       { domain: 'down.test', status: 'pending', attempts: 1 },
@@ -236,7 +185,7 @@ describe('mail to other servers', () => {
     const alice = await addUser(env, 'alice@skiff.local');
     const message = await clientMessage(env, alice, ['typo@skiff.local'], 'Hi', 'x');
     await run(env, clientOperation('sendMessage'), { request: message }, alice.row);
-    await processOutboundQueue(env.db, env.config, () => undefined);
+    await processOutboundQueue(env.db, env.config, () => undefined, offline);
     const [thread] = await inbox(env, alice);
     expect(readEmail(alice, (await threadEmails(env, alice, thread.threadID)).at(-1)).text).toContain(
       'No such user here: typo@skiff.local'
@@ -249,7 +198,7 @@ describe('mail from other servers', () => {
     const external = await startExternalServer();
     const env = await mailEnv(external.port);
     const alice = await addUser(env, 'alice@skiff.local');
-    const smtpPort = await listen(createInboundServer(env.db, env.config, () => undefined));
+    const smtpPort = await listen(createInboundServer(env.db, env.config, { log: () => undefined, resolver: noDns }));
 
     // Alice writes to a friend outside...
     const sent = await run(
@@ -258,7 +207,7 @@ describe('mail from other servers', () => {
       { request: await clientMessage(env, alice, ['friend@external.test'], 'Lunch?', 'Tomorrow at 12?') },
       alice.row
     );
-    await processOutboundQueue(env.db, env.config, () => undefined);
+    await processOutboundQueue(env.db, env.config, () => undefined, offline);
     const outgoingId = (await simpleParser(external.received[0].raw)).messageId;
 
     // ...who replies from their own mail server, with an attachment.
@@ -297,7 +246,7 @@ describe('mail from other servers', () => {
   it('refuses to relay and rejects unknown local users', async () => {
     const env = await mailEnv();
     await addUser(env, 'alice@skiff.local');
-    const smtpPort = await listen(createInboundServer(env.db, env.config, () => undefined));
+    const smtpPort = await listen(createInboundServer(env.db, env.config, { log: () => undefined, resolver: noDns }));
 
     await expect(sendInbound(smtpPort, { to: 'victim@gmail.com', text: 'spam' })).rejects.toMatchObject({
       responseCode: 554

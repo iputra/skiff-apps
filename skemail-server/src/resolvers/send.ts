@@ -12,6 +12,7 @@ import type {
   SendAddressRequest,
   SendEmailRequest
 } from '../generated/graphql';
+import { assertWithinSendLimits, recordSend } from '../limits';
 import { enqueueOutbound } from '../mail/outbound';
 import { storeUpload } from './attachments';
 
@@ -44,6 +45,10 @@ async function deliver(
   if (!message.from.encryptedSessionKey) {
     throw new GraphQLError('from.encryptedSessionKey is required so the sender can read the sent copy');
   }
+
+  const recipientCount = new Set([...message.to, ...message.cc, ...message.bcc].map((r) => normalizeAddress(r.address)))
+    .size;
+  assertWithinSendLimits(ctx.db, ctx.config, sender.user_id, recipientCount);
 
   const copies = new Map<string, Copy>();
   copies.set(sender.user_id, {
@@ -123,6 +128,7 @@ async function deliver(
       inReplyTo
     });
   }
+  recordSend(ctx.db, sender.user_id, recipientCount);
   return { messageID: emailID, threadID };
 }
 

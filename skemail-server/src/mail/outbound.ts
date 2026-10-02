@@ -2,8 +2,11 @@ import { randomUUID } from 'crypto';
 import { promises as dns } from 'dns';
 import fs from 'fs';
 
-import nodemailer from 'nodemailer';
+import { isIP } from 'net';
+import { TLSSocket } from 'tls';
+
 import MailComposer from 'nodemailer/lib/mail-composer';
+import SMTPConnection from 'nodemailer/lib/smtp-connection';
 import { decryptSessionKey } from 'skiff-crypto';
 
 import { Config } from '../config';
@@ -20,8 +23,37 @@ import {
   MailSubjectDatagram,
   MailTextDatagram
 } from './datagrams';
-import { loadDkimKey } from './dkim';
+import { dkimSignMessage, loadDkimKey } from './dkim';
 import { ingestMime, isLocalDomain, SERVER_KEY_NAME } from './ingest';
+import {
+  daneMatches,
+  dohResolver,
+  fetchMtaSts,
+  MtaStsFetcher,
+  MtaStsPolicy,
+  mtaStsPolicyFor,
+  mxAllowedByPolicy,
+  parseTlsa,
+  pkixValid,
+  SecureResolver,
+  Tlsa
+} from './tls-policy';
+
+/** Network lookups used for delivery; tests replace them with fakes. */
+export interface OutboundDeps {
+  /** DNSSEC-validating resolver for MX and TLSA (DANE); null disables DANE. */
+  secureResolver?: SecureResolver | null;
+  mtaSts?: MtaStsFetcher;
+}
+
+export const defaultOutboundDeps = (config: Config): OutboundDeps => ({
+  secureResolver: config.mail.daneDohUrl ? dohResolver(config.mail.daneDohUrl) : null,
+  mtaSts: fetchMtaSts
+});
+
+/** Prepends a DKIM-Signature for the sender's domain. */
+const signDkim = (config: Config, dkimKey: string, envelopeFrom: string, raw: Buffer) =>
+  dkimSignMessage(raw, { domain: envelopeFrom.split('@')[1], selector: config.mail.dkimSelector, privateKey: dkimKey });
 
 /** Delay before each retry after a temporary failure; the message bounces once these run out (~1.5 days). */
 const RETRY_DELAYS_MS = [1, 5, 15, 60, 180, 360, 720].map((m) => m * 60 * 1000);
@@ -127,63 +159,154 @@ function renderMime(db: DB, config: Config, job: QueueRow) {
 
 class PermanentError extends Error {}
 
-async function mxHosts(config: Config, domain: string): Promise<{ host: string; port: number }[]> {
-  const override = config.mail.mxOverrides[domain];
-  if (override) return [override];
-  try {
-    const records = await dns.resolveMx(domain);
-    if (records.length) {
-      return records
-        .sort((a, b) => a.priority - b.priority)
-        .map((r) => ({ host: r.exchange, port: config.mail.outboundPort }));
-    }
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOTFOUND' || code === 'ENODATA') {
-      // RFC 5321 §5.1: without MX records the domain itself is the mail host, if it resolves.
-      await dns.lookup(domain).catch(() => {
-        throw new PermanentError(`Domain ${domain} does not exist or does not receive mail`);
-      });
-      return [{ host: domain, port: config.mail.outboundPort }];
-    }
-    throw err;
-  }
-  return [{ host: domain, port: config.mail.outboundPort }];
+interface MxHost {
+  host: string;
+  port: number;
+  /** The MX answer was DNSSEC-validated (or configured locally), so DANE may apply to this host. */
+  secure: boolean;
 }
 
-/** Hands the message to the recipient domain's MX hosts, trying each in priority order. */
+async function mxHosts(config: Config, domain: string, deps: OutboundDeps): Promise<MxHost[]> {
+  const override = config.mail.mxOverrides[domain];
+  if (override) return [{ ...override, secure: true }];
+  const port = config.mail.outboundPort;
+  const byPriority = (records: { priority: number; exchange: string }[]) =>
+    records.sort((a, b) => a.priority - b.priority).map((r) => r.exchange.replace(/\.$/, ''));
+
+  if (deps.secureResolver) {
+    try {
+      const { answers, secure } = await deps.secureResolver(domain, 'MX');
+      if (answers.length) {
+        const records = answers.map((a) => {
+          const [priority, exchange] = a.split(/\s+/);
+          return { priority: Number(priority), exchange };
+        });
+        return byPriority(records).map((host) => ({ host, port, secure }));
+      }
+    } catch {
+      // Fall back to the system resolver below; DANE then cannot apply.
+    }
+  }
+  try {
+    const records = await dns.resolveMx(domain);
+    if (records.length) return byPriority(records).map((host) => ({ host, port, secure: false }));
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'ENOTFOUND' && code !== 'ENODATA') throw err;
+  }
+  // RFC 5321 §5.1: without MX records the domain itself is the mail host, if it resolves.
+  await dns.lookup(domain).catch(() => {
+    throw new PermanentError(`Domain ${domain} does not exist or does not receive mail`);
+  });
+  return [{ host: domain, port, secure: false }];
+}
+
+/** A TLS requirement (DANE or MTA-STS) the MX host did not meet. Temporary: other hosts or a later try may. */
+class TlsPolicyError extends Error {}
+
+/** The DANE TLSA records that apply to an MX host, or null when DANE does not apply (RFC 7672 §2.2). */
+async function daneRecords(mx: MxHost, deps: OutboundDeps): Promise<Tlsa[] | null> {
+  if (!deps.secureResolver || !mx.secure) return null;
+  let answer;
+  try {
+    answer = await deps.secureResolver(`_${mx.port}._tcp.${mx.host}`, 'TLSA');
+  } catch (err) {
+    // A failed lookup in a signed zone may be an attack; do not fall back to unauthenticated TLS.
+    throw new TlsPolicyError(`TLSA lookup for ${mx.host} failed: ${(err as Error).message}`);
+  }
+  if (!answer.secure) return null;
+  const usable = answer.answers.map(parseTlsa).filter((r): r is Tlsa => !!r && (r.usage === 2 || r.usage === 3));
+  return usable.length ? usable : null;
+}
+
+/**
+ * Hands the message to the recipient domain's MX hosts in priority order, applying the strongest TLS policy the
+ * domain publishes:
+ * - DANE (TLSA records in a DNSSEC-signed zone): STARTTLS required and the certificate must match a TLSA record.
+ * - MTA-STS in enforce mode: only MX hosts listed in the policy, STARTTLS required, publicly trusted certificate
+ *   for the MX name. In testing mode violations are only logged.
+ * - Otherwise opportunistic STARTTLS, as is usual between mail servers.
+ */
 async function deliver(
+  db: DB,
   config: Config,
-  dkimKey: string,
   envelopeFrom: string,
   recipients: string[],
   domain: string,
-  raw: Buffer
+  raw: Buffer,
+  deps: OutboundDeps,
+  log: (msg: string) => void
 ) {
-  const fromDomain = envelopeFrom.split('@')[1];
+  const noPolicy: MtaStsPolicy = { id: false, mode: 'none' };
+  const policy = config.mail.mtaStsEnabled
+    ? await mtaStsPolicyFor(db, domain, deps.mtaSts ?? fetchMtaSts).catch(() => noPolicy)
+    : noPolicy;
+  const enforce = policy.mode === 'enforce';
   let lastError: Error | null = null;
-  for (const mx of await mxHosts(config, domain)) {
-    const transport = nodemailer.createTransport({
+
+  for (const mx of await mxHosts(config, domain, deps)) {
+    const tlsa = await daneRecords(mx, deps).catch((err: Error) => {
+      lastError = err;
+      return undefined;
+    });
+    if (tlsa === undefined) continue;
+    const useMtaSts = !tlsa && policy.mode !== 'none';
+    if (useMtaSts && !mxAllowedByPolicy(mx.host, policy)) {
+      const msg = `MX ${mx.host} is not listed in the MTA-STS policy of ${domain}`;
+      if (enforce) {
+        lastError = new TlsPolicyError(msg);
+        continue;
+      }
+      log(`[outbound] MTA-STS testing: ${msg}`);
+    }
+
+    const connection = new SMTPConnection({
       host: mx.host,
       port: mx.port,
       name: config.mail.hostname,
       secure: false,
-      // Opportunistic STARTTLS, as between MTAs; certificates of other MX hosts are rarely verifiable.
-      tls: { rejectUnauthorized: false },
+      requireTLS: !!tlsa || (useMtaSts && enforce),
+      // Certificates are checked below, according to the policy that applies.
+      tls: { rejectUnauthorized: false, ...(isIP(mx.host) ? {} : { servername: mx.host }) },
       connectionTimeout: CONNECT_TIMEOUT_MS,
-      greetingTimeout: CONNECT_TIMEOUT_MS,
-      dkim: { domainName: fromDomain, keySelector: config.mail.dkimSelector, privateKey: dkimKey }
+      greetingTimeout: CONNECT_TIMEOUT_MS
     });
     try {
-      await transport.sendMail({ envelope: { from: envelopeFrom, to: recipients }, raw });
-      return `${mx.host}:${mx.port}`;
+      await new Promise<void>((resolve, reject) => {
+        connection.once('error', reject);
+        connection.connect(() => resolve());
+      });
+      // SMTPConnection keeps the upgraded TLS socket private.
+      const socket = (connection as unknown as { _socket: TLSSocket })._socket;
+      const encrypted = connection.secure && socket instanceof TLSSocket;
+      let mode = encrypted ? 'TLS' : 'plaintext';
+      if (tlsa) {
+        if (!encrypted || !daneMatches(socket, tlsa, mx.host)) {
+          throw new TlsPolicyError(`certificate of ${mx.host} does not match its DANE TLSA records`);
+        }
+        mode = 'DANE';
+      } else if (useMtaSts) {
+        const ok = encrypted && pkixValid(socket, mx.host);
+        if (!ok && enforce) throw new TlsPolicyError(`${mx.host} has no valid TLS certificate (MTA-STS enforce)`);
+        if (!ok) log(`[outbound] MTA-STS testing: ${mx.host} has no valid TLS certificate`);
+        mode = `MTA-STS ${policy.mode}`;
+      }
+      await new Promise<void>((resolve, reject) =>
+        connection.send({ from: envelopeFrom, to: recipients }, raw, (err) => (err ? reject(err) : resolve()))
+      );
+      connection.quit();
+      return `${mx.host}:${mx.port} (${mode})`;
     } catch (err) {
-      const responseCode = (err as { responseCode?: number }).responseCode;
+      connection.close();
+      const { responseCode, command, code } = err as { responseCode?: number; command?: string; code?: string };
+      // TLS could not be negotiated (e.g. STARTTLS refused while a policy requires it): a temporary failure.
+      if (code === 'ETLS' || command === 'STARTTLS') {
+        lastError = new TlsPolicyError(`${mx.host}: ${(err as Error).message}`);
+        continue;
+      }
       // A 5xx answer is the receiving domain's final word; other MX hosts would say the same.
       if (responseCode && responseCode >= 500) throw new PermanentError((err as Error).message);
       lastError = err as Error;
-    } finally {
-      transport.close();
     }
   }
   throw lastError ?? new Error(`No mail host for ${domain}`);
@@ -224,7 +347,12 @@ function finish(db: DB, job: QueueRow, status: 'sent' | 'failed', error: string 
 }
 
 /** Attempts every job that is due. Exposed for tests; the server runs it on a timer. */
-export async function processOutboundQueue(db: DB, config: Config, log: (msg: string) => void = console.log) {
+export async function processOutboundQueue(
+  db: DB,
+  config: Config,
+  log: (msg: string) => void = console.log,
+  deps: OutboundDeps = defaultOutboundDeps(config)
+) {
   const jobs = db
     .prepare("SELECT * FROM outbound_queue WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY next_attempt_at")
     .all(now()) as QueueRow[];
@@ -237,7 +365,8 @@ export async function processOutboundQueue(db: DB, config: Config, log: (msg: st
         throw new PermanentError(`No such user here: ${recipients.join(', ')}`);
       }
       const message = renderMime(db, config, job);
-      const via = await deliver(config, dkimKey, message.from, recipients, job.domain, await message.build());
+      const signed = await signDkim(config, dkimKey, message.from, await message.build());
+      const via = await deliver(db, config, message.from, recipients, job.domain, signed, deps, log);
       finish(db, job, 'sent', null);
       log(`[outbound] ${message.from} -> ${recipients.join(', ')} delivered via ${via}`);
     } catch (err) {
@@ -259,12 +388,13 @@ export async function processOutboundQueue(db: DB, config: Config, log: (msg: st
 
 /** Runs the queue every few seconds. Returns a function that stops it. */
 export function startOutboundWorker(db: DB, config: Config, intervalMs = 5000) {
+  const deps = defaultOutboundDeps(config);
   let running = false;
   const timer = setInterval(async () => {
     if (running || !config.mail.outboundEnabled) return;
     running = true;
     try {
-      await processOutboundQueue(db, config);
+      await processOutboundQueue(db, config, console.log, deps);
     } catch (err) {
       console.error('[outbound] queue error', err);
     } finally {
