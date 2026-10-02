@@ -8,7 +8,8 @@
   ],
   "scripts": {
     "build:lib": "yarn workspace libs build",
-    "dev": "yarn workspace skemail-web dev"
+    "dev": "yarn workspace skemail-web dev",
+    "spec:skemail-api": "node scripts/skemail-api-spec/generate.js"
   },
   "devDependencies": {
     "@apollo/protobufjs": "^1.2.2",

@@ -1,0 +1,11 @@
+{
+  "reachableFiles": 1102,
+  "operationsDefined": 287,
+  "operationsUsed": 203,
+  "queries": 88,
+  "mutations": 115,
+  "rootQueryFields": 65,
+  "rootMutationFields": 114,
+  "typesInSubset": 328,
+  "typesInFullSchema": 497
+}
