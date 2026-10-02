@@ -11,6 +11,7 @@ import {
   getThread,
   listThreadIDs,
   listUserLabels,
+  markClientsideFiltered,
   modifySystemLabels,
   modifyUserLabels,
   setRead,
@@ -26,6 +27,7 @@ import type {
   MutationDeleteThreadArgs,
   MutationDeleteUserLabelArgs,
   MutationEditUserLabelArgs,
+  MutationMarkThreadsAsClientsideFilteredArgs,
   MutationSetAllThreadsReadStatusArgs,
   MutationSetReadStatusArgs,
   QueryFilteredThreadIDsArgs,
@@ -60,6 +62,7 @@ function mailbox(_: unknown, { request }: QueryMailboxArgs, ctx: Context) {
     read: request.filters?.read,
     before: request.cursor ? { date: request.cursor.date, threadID: request.cursor.threadID } : null,
     updatedAfter: request.emailsUpdatedAfterDate,
+    clientsideFiltersApplied: request.clientsideFiltersApplied,
     limit: limit + 1,
     sortBySent
   });
@@ -168,7 +171,14 @@ export const mailboxResolvers = {
       return true;
     },
     markThreadAsOpened: () => null,
-    markThreadsAsClientsideFiltered: () => null,
+    markThreadsAsClientsideFiltered: (
+      _: unknown,
+      { input }: MutationMarkThreadsAsClientsideFilteredArgs,
+      ctx: Context
+    ) => {
+      markClientsideFiltered(ctx.db, requireUser(ctx).user_id, input.threadIDs);
+      return null;
+    },
     applyLabels: changeLabels('add'),
     removeLabels: changeLabels('remove'),
     bulkApplyLabels: bulkChangeLabels('add'),

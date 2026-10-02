@@ -14,6 +14,7 @@ Server ini **hanya menyimpan ciphertext**. Semua enkripsi dan dekripsi tetap ter
 | Aksi thread | `setReadStatus`, `setAllThreadsReadStatus`, `applyLabels` / `removeLabels` (+ bulk), `bulkTrash`, `deleteThread`, `bulkDeleteTrashedThreads`, CRUD label user |
 | Kirim | `sendMessage`, `replyToMessage` antar user lokal, termasuk lampiran |
 | Lainnya | Draft (`allDrafts`, `createOrUpdateDraft`, `deleteDraft`), kontak, `attachments` + download lewat link bertanda tangan |
+| **Mail server** | Email **ke** dan **dari** server lain (Gmail, dll.): SMTP masuk (MX), pengiriman langsung ke MX penerima dengan DKIM, antrean + retry, bounce, threading lewat `Message-ID` / `In-Reply-To`. Lihat [Email ke dan dari luar](#email-ke-dan-dari-luar). |
 
 **Semua field lain** dari skema tetap ada, tapi mengembalikan nilai default yang valid secara tipe (`null`, `[]`, `''`, `false`, atau objek kosong yang field-nya ikut terisi default). Setiap field seperti itu dicatat sekali di log:
 
@@ -24,7 +25,6 @@ Server ini **hanya menyimpan ciphertext**. Semua enkripsi dan dekripsi tetap ter
 Log ini bisa dipakai sebagai daftar pekerjaan berikutnya.
 
 ### Belum ada
-- **Pengiriman ke luar (SMTP) dan penerimaan dari luar (MX).** Penerima yang tidak punya akun di server ini hanya dicatat: `[send] external delivery not implemented`.
 - `scheduleSendAt` disimpan, tapi email langsung dikirim.
 - MFA, billing, custom domain, import, organisasi/tim, dan dokumen (semuanya masih stub).
 - Tidak ada signup di skemail-web, jadi akun dibuat dengan skrip seed.
@@ -61,6 +61,61 @@ Login dengan `alice@skiff.local` / `password123`, kirim email ke `bob@skiff.loca
 
 Konfigurasi server ada di `.env` (contoh: [`.env.example`](./.env.example)): `PORT`, `PUBLIC_URL`, `CORS_ORIGINS`, `DATA_DIR`, `COOKIE_SECURE`, `LINK_SECRET`. Data tersimpan di `skemail-server/data/` (SQLite + file lampiran).
 
+## Email ke dan dari luar
+
+skemail-server adalah mail server lengkap. Ia **tidak** memakai relay pihak ketiga.
+
+```
+                 SMTP port 25 (MX)                            SMTP port 25
+Gmail, dll. ───────────────────────► src/mail/inbound.ts       src/mail/outbound.ts ───────► MX penerima
+                                       │ parse MIME                ▲ susun ulang MIME + DKIM
+                                       ▼                           │ (antrean, retry, bounce)
+                                 enkripsi untuk kunci         buka session key dengan kunci
+                                 publik penerima              server (externalEncryptedSessionKey)
+                                       │                           ▲
+                                       ▼                           │
+                                 ─────────── SQLite: hanya ciphertext ───────────
+```
+
+- **Keluar.** Kalau ada penerima di luar server, skemail-web juga membungkus session key untuk `decryptionServicePublicKey`. Server memakainya untuk membuka isi email **di memori**, lalu menyusun MIME (teks, HTML, lampiran, `Message-ID`, `In-Reply-To`) dan menandatanganinya dengan **DKIM**. Pesan itu dikirim **langsung** ke host MX domain penerima sesuai urutan prioritas.
+  - Antrean hanya menyimpan referensi dan ciphertext, dan MIME disusun ulang di setiap percobaan.
+  - Kegagalan sementara (4xx atau server tidak bisa dihubungi) dicoba lagi setelah 1 m, 5 m, 15 m, 1 j, 3 j, 6 j, dan 12 j.
+  - Penolakan permanen (5xx) atau habisnya jatah percobaan menghasilkan email **bounce** ("Undelivered Mail Returned to Sender") di inbox pengirim.
+- **Masuk.** Server SMTP bawaan menerima email untuk domain di `MAIL_DOMAINS`. Plaintext langsung dienkripsi dengan session key baru, yang dibungkus untuk kunci publik penerima, dengan format yang sama persis seperti email dari sesama user Skiff. Balasan otomatis masuk ke thread yang benar lewat `In-Reply-To` / `References`.
+  - Server **tidak pernah me-relay**: penerima di domain lain ditolak dengan `554`, dan user yang tidak ada ditolak dengan `550`. Tidak ada `AUTH`; user mengirim lewat GraphQL.
+- **Batas enkripsi.** Seperti di Skiff asli, email ke dan dari luar **tidak** end-to-end, karena server melihat isinya sesaat di memori. Email antar user di server yang sama tetap end-to-end.
+
+### Mencoba secara lokal (tanpa domain)
+
+`MX_OVERRIDES` mengarahkan sebuah domain ke host tertentu, sehingga "server lain" bisa dijalankan di komputer yang sama:
+
+```bash
+# Terminal 1: server SMTP apa pun di port 2626 berperan sebagai external.test,
+# misalnya Mailpit: docker run -p 2626:1025 -p 8025:8025 axllent/mailpit  (lihat email di http://localhost:8025)
+# Terminal 2:
+MX_OVERRIDES=external.test=127.0.0.1:2626 yarn dev:server
+```
+
+Kirim email dari alice ke `siapa@external.test` lewat UI, dan email itu muncul di Mailpit. Untuk mengirim email masuk ke alice, pakai klien SMTP apa pun ke `localhost:2525`, misalnya [swaks](https://github.com/jetmore/swaks):
+
+```bash
+swaks --server localhost:2525 --from teman@external.test --to alice@skiff.local \
+      --header "Subject: Halo dari luar" --body "Isi email"
+```
+
+### Memakai domain sungguhan
+
+1. **Server.** Pakai VPS dengan IP publik statis. **Port 25 harus terbuka keluar maupun masuk**: banyak penyedia cloud (AWS, GCP, Azure, DigitalOcean, dan sebagainya) memblokir port 25 secara default dan harus diminta membukanya. Minta juga penyedia mengatur **reverse DNS (PTR)** IP itu ke `MAIL_HOSTNAME`.
+2. **Konfigurasi `.env`.** Isi `MAIL_DOMAINS=example.com`, `MAIL_HOSTNAME=mail.example.com`, `SMTP_PORT=25`, dan (disarankan) `SMTP_TLS_KEY_FILE` / `SMTP_TLS_CERT_FILE` dari Let's Encrypt untuk `mail.example.com`. Akun harus memakai domain itu, misalnya `yarn seed:server alice@example.com:rahasia:Alice`.
+3. **DNS.** Jalankan `yarn workspace skemail-server dns <IP-server>` untuk mencetak record yang perlu dibuat: `A` untuk host mail, `MX`, `SPF`, `DKIM` (kunci dibuat otomatis di `data/dkim-private.pem`), dan `DMARC`.
+4. **Uji.** Kirim email ke alamat dari [mail-tester.com](https://www.mail-tester.com) untuk memeriksa SPF, DKIM, DMARC, PTR, dan blacklist. Lalu uji kirim dan terima ke akun Gmail.
+
+### Belum ada di mail server
+- **Pemeriksaan email masuk.** SPF, DKIM, dan DMARC pengirim belum diverifikasi, dan belum ada filter spam, greylisting, atau rate limit. Email masuk saat ini diterima apa adanya.
+- MTA-STS, DANE, dan laporan TLS.
+- Dukungan IPv6 khusus. Pengiriman memakai apa yang dikembalikan DNS, jadi pastikan IPv6 juga punya PTR, atau nonaktifkan IPv6 keluar.
+- Batas kirim per user, untuk mencegah akun yang dibobol dipakai mengirim spam.
+
 ## Cara kerja
 
 ```
@@ -71,9 +126,12 @@ src/
   context.ts        sesi: cookie skiff_session_<userID> + header x-skiff-userid
   scalars.ts        Date, PublicKey, JSON, Void, Upload
   resolvers/        auth, user, mailbox, send, drafts, contacts, attachments
+  mail/             inbound (SMTP/MX), ingest (MIME -> ciphertext), outbound (antrean, MX, DKIM, bounce),
+                    datagrams (format terenkripsi skemail-web), dkim
   db/               SQLite (better-sqlite3), migrasi SQL, query
 scripts/
   seed.ts           membuat akun seperti alur signup frontend
+  dns.ts            mencetak record DNS (MX, SPF, DKIM, DMARC) untuk MAIL_DOMAINS
   clientCrypto.ts   kripto sisi klien (seed dan test), memakai libs/skiff-crypto
 test/               vitest
 ```
@@ -93,6 +151,11 @@ yarn workspace skemail-server codegen     # setelah schema.graphql berubah
 
 - `test/auth.test.ts` menguji login SRP penuh: `encryptedUserData` yang dikembalikan bisa didekripsi dengan password yang benar, sedangkan password salah ditolak.
 - `test/send.test.ts`: alice → bob dengan konten dan session key terenkripsi asli, reply masuk ke thread yang sama, pemindahan ke TRASH, dan larangan mengirim dari alamat milik orang lain. Test ini memakai **teks operasi persis milik frontend** dari `docs/skemail-web-api/operations.graphql`.
+- `test/external-mail.test.ts` memakai server SMTP palsu sebagai "Gmail":
+  - Email keluar sampai dengan isi, lampiran, dan DKIM yang **lolos verifikasi** (`mailauth`).
+  - Retry untuk server yang tidak bisa dihubungi, dan bounce untuk penolakan 5xx serta user lokal yang tidak ada.
+  - Email masuk terenkripsi untuk penerima dan masuk ke thread yang benar, lengkap dengan lampiran.
+  - Penolakan relay (`554`) dan user tidak dikenal (`550`).
 - `test/contract.test.ts` menjalankan **setiap** operasi skemail-web (203) dengan variabel minimal, lalu memastikan tidak ada respons yang melanggar skema atau resolver yang crash.
 
 ## Catatan build library

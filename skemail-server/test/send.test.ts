@@ -132,6 +132,42 @@ describe('sending between local users', () => {
     expect(await inbox(env, alice, 'SENT')).toHaveLength(1);
   });
 
+  it('hands each received thread to the client mail filters once, until a new email arrives', async () => {
+    const env = await createTestEnv();
+    const alice = await addUser(env, 'alice@skiff.local');
+    const bob = await addUser(env, 'bob@skiff.local');
+    const unfiltered = async (user: TestUser) =>
+      (
+        await run(
+          env,
+          clientOperation('mailboxWithContent'),
+          { request: { clientsideFiltersApplied: false, limit: 50 } },
+          user.row
+        )
+      ).data!.mailbox.threads.map((t: any) => t.threadID);
+
+    const sent = await run(
+      env,
+      clientOperation('sendMessage'),
+      { request: encryptedMessage(alice, [bob], 'S', 'B') },
+      alice.row
+    );
+    const { threadID, messageID } = sent.data!.sendMessage;
+    expect(await unfiltered(bob)).toEqual([threadID]);
+    expect(await unfiltered(alice)).toEqual([]);
+
+    await run(env, clientOperation('markThreadsAsClientsideFiltered'), { request: { threadIDs: [threadID] } }, bob.row);
+    expect(await unfiltered(bob)).toEqual([]);
+
+    await run(
+      env,
+      clientOperation('sendReplyMessage'),
+      { request: { ...encryptedMessage(alice, [bob], 'Re', 'B2'), replyID: messageID } },
+      alice.row
+    );
+    expect(await unfiltered(bob)).toEqual([threadID]);
+  });
+
   it('refuses to send from an address the user does not own', async () => {
     const env = await createTestEnv();
     const alice = await addUser(env, 'alice@skiff.local');

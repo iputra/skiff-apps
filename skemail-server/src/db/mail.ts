@@ -23,9 +23,10 @@ interface ThreadRow {
   sent_label_updated_at: string | null;
   thread_content_updated_at: string;
   deleted_at: string | null;
+  clientside_filters_applied: number;
 }
 
-interface EmailRow {
+export interface EmailRow {
   email_id: string;
   thread_id: string;
   user_id: string;
@@ -43,6 +44,7 @@ interface EmailRow {
   encrypted_by_json: string;
   schedule_send_at: string | null;
   created_at: string;
+  message_id: string | null;
 }
 
 export interface UserLabelRow {
@@ -71,6 +73,8 @@ export interface NewEmail {
   encryptedBy: PublicKey;
   scheduleSendAt?: Date | null;
   createdAt: string;
+  /** RFC 5322 Message-ID, including angle brackets. */
+  messageId?: string | null;
 }
 
 const labelsOf = (row: ThreadRow) => fromJSON<string[]>(row.system_labels_json, []);
@@ -89,6 +93,8 @@ export function deliverEmail(
   db.transaction(() => {
     const existing = getThreadRow(db, email.userID, email.threadID);
     const isSent = options.addLabels.includes('SENT');
+    // Mail filters apply to received mail, so an incoming email puts its thread back in the client's queue.
+    const receivesFilters = options.addLabels.includes('INBOX');
     if (existing) {
       const labels = new Set(labelsOf(existing));
       // A new message brings an archived/trashed thread back to the inbox.
@@ -96,7 +102,8 @@ export function deliverEmail(
       options.addLabels.forEach((l) => labels.add(l));
       db.prepare(
         `UPDATE threads SET system_labels_json = ?, read = ?, emails_updated_at = ?, thread_content_updated_at = ?,
-           sent_label_updated_at = COALESCE(?, sent_label_updated_at), deleted_at = NULL
+           sent_label_updated_at = COALESCE(?, sent_label_updated_at), deleted_at = NULL,
+           clientside_filters_applied = clientside_filters_applied AND ?
          WHERE thread_id = ? AND user_id = ?`
       ).run(
         toJSON([...labels]),
@@ -104,14 +111,15 @@ export function deliverEmail(
         email.createdAt,
         email.createdAt,
         isSent ? email.createdAt : null,
+        receivesFilters ? 0 : 1,
         email.threadID,
         email.userID
       );
     } else {
       db.prepare(
         `INSERT INTO threads (thread_id, user_id, read, system_labels_json, emails_updated_at,
-           sent_label_updated_at, thread_content_updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
+           sent_label_updated_at, thread_content_updated_at, clientside_filters_applied)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         email.threadID,
         email.userID,
@@ -119,14 +127,15 @@ export function deliverEmail(
         toJSON(options.addLabels),
         email.createdAt,
         isSent ? email.createdAt : null,
-        email.createdAt
+        email.createdAt,
+        receivesFilters ? 0 : 1
       );
     }
     db.prepare(
       `INSERT INTO emails (email_id, thread_id, user_id, from_json, to_json, cc_json, bcc_json, reply_to_json,
          encrypted_subject, encrypted_text, encrypted_html, encrypted_text_as_html, encrypted_text_snippet,
-         encrypted_session_key, encrypted_by_json, schedule_send_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         encrypted_session_key, encrypted_by_json, schedule_send_at, created_at, message_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       email.emailID,
       email.threadID,
@@ -144,7 +153,8 @@ export function deliverEmail(
       email.encryptedSessionKey,
       toJSON(email.encryptedBy),
       email.scheduleSendAt ? email.scheduleSendAt.toISOString() : null,
-      email.createdAt
+      email.createdAt,
+      email.messageId ?? null
     );
     const insertAttachment = db.prepare(
       'INSERT INTO attachments (attachment_id, email_id, user_id, encrypted_metadata, blob_path) VALUES (?, ?, ?, ?, ?)'
@@ -152,6 +162,11 @@ export function deliverEmail(
     for (const a of attachments)
       insertAttachment.run(a.attachmentID, email.emailID, email.userID, a.encryptedMetadata, a.blobPath);
   })();
+}
+
+export function markClientsideFiltered(db: DB, userID: string, threadIDs: string[]) {
+  const stmt = db.prepare('UPDATE threads SET clientside_filters_applied = 1 WHERE user_id = ? AND thread_id = ?');
+  db.transaction(() => threadIDs.forEach((id) => stmt.run(userID, id)))();
 }
 
 export function setRead(db: DB, userID: string, threadIDs: string[], read: boolean): string[] {
@@ -273,6 +288,8 @@ export interface MailboxQuery {
   updatedAfter?: Date | null;
   limit?: number | null;
   sortBySent?: boolean;
+  /** `false` returns only threads the client has not run its mail filters on yet. */
+  clientsideFiltersApplied?: boolean | null;
 }
 
 /** Thread IDs in a mailbox, newest first. `label` is a system label (e.g. INBOX) or a user labelID. */
@@ -295,6 +312,7 @@ export function listThreadIDs(db: DB, userID: string, q: MailboxQuery): string[]
     }
     if (!wanted.some((l) => HIDING_LABELS.includes(l)) && sys.some((l) => HIDING_LABELS.includes(l))) return false;
     if (q.read !== null && q.read !== undefined && !!row.read !== q.read) return false;
+    if (q.clientsideFiltersApplied === false && row.clientside_filters_applied) return false;
     if (q.updatedAfter && new Date(row.emails_updated_at) <= q.updatedAfter) return false;
     if (q.before) {
       const at = new Date(row.sort_at).getTime();
@@ -383,6 +401,25 @@ export function findThreadIDForEmail(db: DB, userID: string, emailID: string): s
     | { thread_id: string }
     | undefined;
   return row?.thread_id ?? null;
+}
+
+export const getEmailRow = (db: DB, userID: string, emailID: string) =>
+  db.prepare('SELECT * FROM emails WHERE user_id = ? AND email_id = ?').get(userID, emailID) as EmailRow | undefined;
+
+export function listAttachmentRows(db: DB, userID: string, emailID: string) {
+  return db
+    .prepare('SELECT attachment_id, encrypted_metadata, blob_path FROM attachments WHERE user_id = ? AND email_id = ?')
+    .all(userID, emailID) as { attachment_id: string; encrypted_metadata: string; blob_path: string }[];
+}
+
+/** The user's thread containing any of the given Message-IDs (In-Reply-To / References of an incoming email). */
+export function findThreadByMessageIds(db: DB, userID: string, messageIds: string[]): string | null {
+  const stmt = db.prepare('SELECT thread_id FROM emails WHERE user_id = ? AND message_id = ? LIMIT 1');
+  for (const id of messageIds) {
+    const row = stmt.get(userID, id) as { thread_id: string } | undefined;
+    if (row) return row.thread_id;
+  }
+  return null;
 }
 
 export function getAttachment(db: DB, userID: string, attachmentID: string) {

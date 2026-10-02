@@ -11,6 +11,7 @@ import {
   toGraphQLUser,
   UserRow
 } from '../db/users';
+import { SERVER_KEY_NAME } from '../mail/ingest';
 import type {
   MutationSetDefaultEmailAliasArgs,
   MutationSetUserPreferencesArgs,
@@ -67,7 +68,7 @@ export const userResolvers = {
       getAliases(ctx.db, userID).map((a) => a.alias),
     userPreferences: (_: unknown, __: unknown, ctx: Context) => getPreferences(ctx.db, requireUser(ctx).user_id),
     decryptionServicePublicKey: (_: unknown, __: unknown, ctx: Context) => ({
-      key: getOrCreateServerKey(ctx.db, 'decryption-service').publicKey
+      key: getOrCreateServerKey(ctx.db, SERVER_KEY_NAME).publicKey
     })
   },
   Mutation: {

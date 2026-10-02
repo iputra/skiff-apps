@@ -4,7 +4,7 @@ import { GraphQLError } from 'graphql';
 
 import { Context, requireUser } from '../context';
 import { now } from '../db/db';
-import { deliverEmail, findThreadIDForEmail, NewEmail } from '../db/mail';
+import { deliverEmail, findThreadIDForEmail, getEmailRow, NewEmail } from '../db/mail';
 import { getAliases, getUserByAlias, normalizeAddress, PublicKey } from '../db/users';
 import type {
   MutationReplyToMessageArgs,
@@ -12,6 +12,7 @@ import type {
   SendAddressRequest,
   SendEmailRequest
 } from '../generated/graphql';
+import { enqueueOutbound } from '../mail/outbound';
 import { storeUpload } from './attachments';
 
 interface Copy {
@@ -26,10 +27,15 @@ const toAddress = (a: SendAddressRequest) => ({ address: normalizeAddress(a.addr
 /**
  * Stores one copy of the email per participant: the sender gets it under SENT, every recipient that has
  * an account here gets it under INBOX. Each copy carries the session key the client encrypted for that
- * participant, so the server never sees plaintext. Recipients without an account are only logged until
- * SMTP delivery exists.
+ * participant, so the server never sees plaintext. Recipients without an account are queued for SMTP
+ * delivery, using the session key the client wrapped for the server (externalEncryptedSessionKey).
  */
-async function deliver(ctx: Context, message: SendEmailRequest, existingThreadID: string | null) {
+async function deliver(
+  ctx: Context,
+  message: SendEmailRequest,
+  existingThreadID: string | null,
+  inReplyTo: string | null = null
+) {
   const sender = requireUser(ctx);
   const fromAddress = normalizeAddress(message.from.address);
   if (!getAliases(ctx.db, sender.user_id).some((a) => a.alias === fromAddress)) {
@@ -70,8 +76,8 @@ async function deliver(ctx: Context, message: SendEmailRequest, existingThreadID
       encryptedBy: rcpt.encryptedSessionKey.encryptedBy
     });
   }
-  if (external.length) {
-    console.warn(`[send] external delivery not implemented; not delivered to: ${external.join(', ')}`);
+  if (external.length && !message.externalEncryptedSessionKey) {
+    throw new GraphQLError('externalEncryptedSessionKey is required to send to addresses outside this server');
   }
 
   const attachments = await Promise.all(
@@ -85,6 +91,7 @@ async function deliver(ctx: Context, message: SendEmailRequest, existingThreadID
   const emailID = randomUUID();
   const threadID = existingThreadID ?? randomUUID();
   const createdAt = now();
+  const messageId = `<${emailID}@${fromAddress.split('@')[1]}>`;
   for (const [userID, copy] of copies) {
     const email: NewEmail = {
       emailID,
@@ -102,9 +109,19 @@ async function deliver(ctx: Context, message: SendEmailRequest, existingThreadID
       encryptedSessionKey: copy.encryptedSessionKey,
       encryptedBy: copy.encryptedBy,
       scheduleSendAt: message.scheduleSendAt ?? null,
-      createdAt
+      createdAt,
+      messageId
     };
     deliverEmail(ctx.db, email, { addLabels: [...copy.labels], read: copy.read }, attachments);
+  }
+  if (external.length && message.externalEncryptedSessionKey) {
+    enqueueOutbound(ctx.db, {
+      senderUserID: sender.user_id,
+      emailID,
+      externalSessionKey: message.externalEncryptedSessionKey,
+      recipients: external,
+      inReplyTo
+    });
   }
   return { messageID: emailID, threadID };
 }
@@ -120,7 +137,8 @@ export const sendResolvers = {
       const user = requireUser(ctx);
       const threadID = findThreadIDForEmail(ctx.db, user.user_id, message.replyID);
       if (!threadID) throw new GraphQLError(`Unknown email ${message.replyID}`, { extensions: { code: 'NOT_FOUND' } });
-      return deliver(ctx, message, threadID);
+      const inReplyTo = getEmailRow(ctx.db, user.user_id, message.replyID)?.message_id ?? null;
+      return deliver(ctx, message, threadID, inReplyTo);
     }
   }
 };

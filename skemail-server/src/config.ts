@@ -12,6 +12,43 @@ export interface Config {
   cookieSecure: boolean;
   /** HMAC key for signed attachment download links. */
   linkSecret: string;
+  mail: MailConfig;
+}
+
+export interface MailConfig {
+  /** Domains this server hosts mailboxes for; mail to any other domain is delivered to the internet. */
+  domains: string[];
+  /** Hostname announced in SMTP greetings (EHLO/banner); should match the MX record and reverse DNS. */
+  hostname: string;
+  /** Port of the inbound SMTP server (25 in production, 0 disables it). */
+  smtpPort: number;
+  smtpHost: string;
+  /** PEM files for STARTTLS on the inbound server; a self-signed certificate is used when unset. */
+  tlsKeyFile?: string;
+  tlsCertFile?: string;
+  maxMessageBytes: number;
+  /** Deliver to other servers (false keeps mail queued, useful offline). */
+  outboundEnabled: boolean;
+  /** Port used to reach other servers' MX hosts (always 25 on the internet). */
+  outboundPort: number;
+  /** `domain=host:port` pairs that bypass MX lookup, for local testing. */
+  mxOverrides: Record<string, { host: string; port: number }>;
+  dkimSelector: string;
+  dkimKeyFile: string;
+}
+
+function parseMxOverrides(value = ''): MailConfig['mxOverrides'] {
+  return Object.fromEntries(
+    value
+      .split(',')
+      .map((pair) => pair.trim())
+      .filter(Boolean)
+      .map((pair) => {
+        const [domain, target] = pair.split('=');
+        const [host, port] = target.split(':');
+        return [domain.toLowerCase(), { host, port: Number(port || 25) }];
+      })
+  );
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -28,7 +65,29 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       .filter(Boolean),
     cookieSecure: env.COOKIE_SECURE === 'true',
     // A random secret means links stop working after a restart, which is fine for local development.
-    linkSecret: env.LINK_SECRET ?? randomBytes(32).toString('hex')
+    linkSecret: env.LINK_SECRET ?? randomBytes(32).toString('hex'),
+    mail: loadMailConfig(env, dataDir)
+  };
+}
+
+function loadMailConfig(env: NodeJS.ProcessEnv, dataDir: string): MailConfig {
+  const domains = (env.MAIL_DOMAINS ?? 'skiff.local')
+    .split(',')
+    .map((d) => d.trim().toLowerCase())
+    .filter(Boolean);
+  return {
+    domains,
+    hostname: env.MAIL_HOSTNAME ?? `mail.${domains[0]}`,
+    smtpPort: Number(env.SMTP_PORT ?? 2525),
+    smtpHost: env.SMTP_HOST ?? '0.0.0.0',
+    tlsKeyFile: env.SMTP_TLS_KEY_FILE,
+    tlsCertFile: env.SMTP_TLS_CERT_FILE,
+    maxMessageBytes: Number(env.MAX_MESSAGE_BYTES ?? 30 * 1024 * 1024),
+    outboundEnabled: env.OUTBOUND_ENABLED !== 'false',
+    outboundPort: Number(env.OUTBOUND_SMTP_PORT ?? 25),
+    mxOverrides: parseMxOverrides(env.MX_OVERRIDES),
+    dkimSelector: env.DKIM_SELECTOR ?? 'skemail',
+    dkimKeyFile: env.DKIM_KEY_FILE ?? path.join(dataDir, 'dkim-private.pem')
   };
 }
 

@@ -3,8 +3,13 @@
     "target": "ES2022",
     "module": "commonjs",
     "moduleResolution": "node",
-    "lib": ["ES2022", "DOM"],
-    "types": ["node"],
+    "lib": [
+      "ES2022",
+      "DOM"
+    ],
+    "types": [
+      "node"
+    ],
     "strict": true,
     "esModuleInterop": true,
     "resolveJsonModule": true,
@@ -13,10 +18,23 @@
     "noEmit": true,
     "baseUrl": ".",
     "paths": {
-      "skiff-crypto": ["../libs/skiff-crypto/src/index.ts"],
-      "skiff-graphql": ["../libs/skiff-graphql/src/index.ts"],
-      "skiff-utils": ["../libs/skiff-utils/src/index.ts"]
+      "skiff-crypto": [
+        "../libs/skiff-crypto/src/index.ts"
+      ],
+      "skiff-graphql": [
+        "../libs/skiff-graphql/src/index.ts"
+      ],
+      "skiff-utils": [
+        "../libs/skiff-utils/src/index.ts"
+      ],
+      "skiff-mail-protos": [
+        "../libs/skiff-mail-protos/src/index.ts"
+      ]
     }
   },
-  "include": ["src", "scripts", "test"]
+  "include": [
+    "src",
+    "scripts",
+    "test"
+  ]
 }
