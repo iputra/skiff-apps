@@ -137,7 +137,8 @@ export function toGraphQLUser(db: DB, row: UserRow) {
     skemailStorageUsage: { attachmentUsageBytes: '0', messageUsageBytes: '0' },
     invoiceHistory: { invoiceHistory: [] },
     subscriptionInfo: {
-      subscriptionPlan: 'FREE',
+      // A TierName ('Free'), not the SubscriptionPlan enum: see useSubscriptionPlan in skiff-front-graphql.
+      subscriptionPlan: 'Free',
       cancelAtPeriodEnd: false,
       isAppleSubscription: false,
       isCryptoSubscription: false,

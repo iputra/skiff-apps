@@ -6,6 +6,13 @@
     "emitDeclarationOnly": true,
     "noEmit": false,
     "skipLibCheck": true,
-    "lib": ["es2021", "dom", "dom.iterable", "webworker.importscripts"]
+    "lib": [
+      "es2021",
+      "dom",
+      "dom.iterable",
+      "webworker.importscripts"
+    ],
+    "jsx": "react-jsx",
+    "isolatedModules": false
   }
 }

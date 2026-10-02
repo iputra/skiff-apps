@@ -2,6 +2,7 @@
  * Base webpack config used across other specific configs
  */
 
+import fs from 'fs';
 import path from 'path';
 
 import FaviconsWebpackPlugin from 'favicons-webpack-plugin';
@@ -9,6 +10,49 @@ import HtmlWebpackPlugin from 'html-webpack-plugin';
 import webpack from 'webpack';
 
 const isDevelopment = process.env.NODE_ENV !== 'production';
+
+/**
+ * Packages that hold React context or other module-level state. Yarn installs separate copies of some of them
+ * for the libs (e.g. nightwatch-ui, skiff-front-utils) because of differing peer dependencies, even at the same
+ * version. Two copies mean two contexts, so providers set up by skemail-web are invisible to hooks inside the
+ * libs (e.g. `useSnackbar()` returning undefined). Resolve all of them to skemail-web's copy.
+ */
+const SINGLETON_PACKAGES = [
+  '@apollo/client',
+  '@emotion/react',
+  '@emotion/styled',
+  '@floating-ui/react-dom',
+  '@floating-ui/react-dom-interactions',
+  '@mui/base',
+  '@mui/material',
+  '@mui/system',
+  'framer-motion',
+  'launchdarkly-react-client-sdk',
+  'notistack',
+  'react',
+  'react-dom',
+  'react-redux',
+  'react-transition-group',
+  'styled-components'
+];
+
+const packageDir = (name) =>
+  [path.join(__dirname, '..', 'node_modules', name), path.join(__dirname, '..', '..', 'node_modules', name)].find(
+    (dir) => fs.existsSync(path.join(dir, 'package.json'))
+  );
+
+/**
+ * ProseMirror rejects plugins and schemas created by a different copy of its packages ("Adding different instances
+ * of a keyed plugin"). @tiptap/pm pulls in its own, newer prosemirror-* copies; the hoisted ones satisfy its version
+ * ranges, so every prosemirror-* import is resolved to the hoisted copy.
+ */
+const PROSEMIRROR_PACKAGES = fs
+  .readdirSync(path.join(__dirname, '..', '..', 'node_modules'))
+  .filter((name) => name.startsWith('prosemirror-'));
+
+const singletonAliases = Object.fromEntries(
+  [...SINGLETON_PACKAGES, ...PROSEMIRROR_PACKAGES].map((name) => [name, packageDir(name)]).filter(([, dir]) => !!dir)
+);
 
 export default {
   module: {
@@ -236,6 +280,7 @@ export default {
    */
   resolve: {
     alias: {
+      ...singletonAliases,
       handlebars: 'handlebars/dist/handlebars.js',
       '@mui/material/Box': require.resolve('@mui/material/Box') // Make sure we use the same Box - fix crash when opening workspaces drawer. TODO: Remove it after we have the same MUI versions for all deps
     },

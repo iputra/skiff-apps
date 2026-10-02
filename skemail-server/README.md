@@ -37,9 +37,11 @@ Langkah 1–2 cukup sekali.
 # 1. Dependency monorepo
 yarn
 
-# 2. Library bersama (skiff-crypto dipakai oleh seed). Lihat "Catatan build library" di bawah.
-(cd libs/skiff-utils && yarn node build.js)
-(cd libs/skiff-crypto && yarn node build.js)
+# 2. Bundle JS library bersama, berurutan (lihat "Catatan build library" di bawah)
+for lib in skiff-utils skiff-mail-protos skiff-graphql skiff-crypto skiff-crypto-v2 \
+           skiff-front-graphql skiff-front-search nightwatch-ui skiff-front-utils; do
+  (cd libs/$lib && yarn node build.js)
+done
 
 # 3. Buat akun demo: alice@skiff.local dan bob@skiff.local, password: password123
 yarn seed:server
@@ -47,9 +49,15 @@ yarn seed:server
 
 # 4. Jalankan server (http://localhost:4000/graphql)
 yarn dev:server
+
+# 5. Di terminal lain: arahkan skemail-web ke server ini, lalu jalankan
+cp skemail-web/.env.example skemail-web/.env     # SKEMAIL_API_BASE_URL=http://localhost:4000
+yarn dev                                         # buka http://localhost:4200/mail/inbox
 ```
 
-Untuk menyambungkan frontend, salin `skemail-web/.env.example` ke `skemail-web/.env` (isinya `SKEMAIL_API_BASE_URL=http://localhost:4000`), lalu jalankan `yarn dev` dan buka http://localhost:4200/mail/inbox.
+Setiap `yarn node build.js` mencetak error `tsc` (lihat catatan di bawah). Error itu bisa diabaikan selama folder `dist/cjs` dan `dist/esm` terbentuk. Kalau sebuah build tidak kembali ke prompt setelah selesai, tekan Ctrl+C. Itu proses esbuild yang menggantung, dan hasil build-nya sudah tersimpan.
+
+Login dengan `alice@skiff.local` / `password123`, kirim email ke `bob@skiff.local`, lalu login sebagai bob untuk membaca dan membalas. Alur ini sudah diuji di Chromium.
 
 Konfigurasi server ada di `.env` (contoh: [`.env.example`](./.env.example)): `PORT`, `PUBLIC_URL`, `CORS_ORIGINS`, `DATA_DIR`, `COOKIE_SECURE`, `LINK_SECRET`. Data tersimpan di `skemail-server/data/` (SQLite + file lampiran).
 
@@ -95,10 +103,9 @@ yarn workspace skemail-server codegen     # setelah schema.graphql berubah
 - Script build memanggil workspace `@skiff-org/skiff-crypto` yang tidak ada (namanya `skiff-crypto`).
 - Codegen `skiff-graphql` membuat ulang `completeSchema.graphql` dari `supergraph.graphql` yang sudah usang. Akibatnya `skiff-front-graphql` gagal divalidasi.
 
-Selain itu, **dev server `skemail-web` sendiri belum bisa dikompilasi** di repo ini:
-- `@tiptap/core@2.0.3` membutuhkan peer dependency `@tiptap/pm`, yang sama sekali tidak ada di `yarn.lock`.
-- Bundle ESM `nightwatch-ui` tidak bisa di-parse oleh konfigurasi webpack skemail-web.
+Perbaikan yang dibutuhkan supaya `skemail-web` bisa dikompilasi dan berjalan:
+- **`@tiptap/pm`** ditambahkan ke dependency skemail-web. Paket ini adalah peer dependency wajib `@tiptap/core@2.0.3` dan sebelumnya tidak ada di `yarn.lock`.
+- **`libs/tsconfig.json`** memakai `"jsx": "react-jsx"`. Tanpa itu, esbuild mewarisi `"jsx": "react-native"` (JSX tidak ditransformasi) dari tsconfig root, sehingga bundle `nightwatch-ui` berisi JSX mentah.
+- **Alias singleton di `skemail-web/configs/webpack.config.base.js`.** Yarn memasang salinan terpisah (versi sama) dari `@apollo/client`, `styled-components`, `notistack`, `@mui/*`, `react-redux` dan lainnya untuk library workspace. Dua salinan berarti dua React context, sehingga misalnya `useSnackbar()` di dalam library mengembalikan `undefined`. Semua paket `prosemirror-*` juga diarahkan ke salinan yang di-hoist, karena `@tiptap/pm` membawa versi lebih baru dan ProseMirror menolak plugin dari instance berbeda.
 
-Karena itu, server ini baru diverifikasi lewat test (memakai teks operasi persis milik frontend dan kripto asli) dan lewat HTTP sungguhan (login SRP, cookie, request batch, upload multipart, preflight CORS). Uji lewat UI menunggu build frontend diperbaiki.
-
-Bundle JS tiap library tetap bisa dibuat dengan `yarn node build.js` di folder masing-masing. Langkah `tsc` (file `.d.ts`) gagal, karena itu `tsconfig.json` server memetakan `skiff-crypto` / `skiff-graphql` / `skiff-utils` langsung ke source TS-nya. **Jangan commit** perubahan `libs/skiff-graphql/src/completeSchema.graphql` atau `types.ts` yang muncul setelah menjalankan `yarn build:lib`.
+Karena masalah `yarn build:lib` di atas, bundle JS tiap library dibuat dengan `yarn node build.js` di folder masing-masing (langkah 2). Langkah `tsc` (file `.d.ts`) gagal, karena itu `tsconfig.json` server memetakan `skiff-crypto` / `skiff-graphql` / `skiff-utils` langsung ke source TS-nya. **Jangan commit** perubahan `libs/skiff-graphql/src/completeSchema.graphql` atau `types.ts` yang muncul setelah menjalankan `yarn build:lib`.
