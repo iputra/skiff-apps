@@ -27,7 +27,9 @@ export const getBaseProxyURL = (originUrl: URL): URL => {
     case 'production':
       return new URL('https://resource-proxy.skiff.com');
     default:
-      throw Error('Unknown NODE_ENV used');
+      // Self-hosted origins have no resource proxy: point at our own origin, where proxied remote
+      // content (and WKD lookups) simply 404 instead of being fetched from the sender's server.
+      return new URL(originUrl.origin);
   }
 };
 

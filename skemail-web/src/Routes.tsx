@@ -31,6 +31,8 @@ const loggedInRoutes = [
 
 export default function Routes() {
   const env = getEnvironment(new URL(window.location.origin));
+  // Same origins as useFetchCurrentUser: no shared editor login, so skemail renders its own.
+  const hasOwnLogin = env === 'local' || env === 'review_app' || env === 'vercel';
 
   return (
     <Router history={history}>
@@ -50,10 +52,10 @@ export default function Routes() {
             </Route>
           </Layout>
           {/**
-           * Only render the skemail login container during local development. If we're not running
-           * the app locally and the user is not logged in, we will redirect to the editor login page.
+           * Only render the skemail login container when there is no separate editor login
+           * (local development and self-hosted origins); otherwise we redirect to the editor login page.
            */}
-          {env === 'local' && (
+          {hasOwnLogin && (
             <Route
               component={lazyloadRoute(() => import('./pages/SkemailLoginContainer'))}
               path={[MailAppRoutes.HOME]}
