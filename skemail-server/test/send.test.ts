@@ -75,6 +75,41 @@ describe('sending between local users', () => {
     expect(aliceInbox[0].attributes.read).toBe(false);
   });
 
+  it('stores a reply under the client-chosen customMessageID, so the optimistic copy is replaced, not duplicated', async () => {
+    const env = await createTestEnv();
+    const alice = await addUser(env, 'alice@skiff.local');
+    const bob = await addUser(env, 'bob@skiff.local');
+    const sent = await run(
+      env,
+      clientOperation('sendMessage'),
+      { request: encryptedMessage(alice, [bob], 'Hi Bob', 'First') },
+      alice.row
+    );
+    const { threadID, messageID } = sent.data!.sendMessage;
+    const reply = (customMessageID: string) =>
+      run(
+        env,
+        clientOperation('sendReplyMessage'),
+        { request: { ...encryptedMessage(bob, [alice], 'Re: Hi Bob', 'Again'), replyID: messageID, customMessageID } },
+        bob.row
+      );
+
+    const customID = '0b5e7c1a-3f2d-4e8b-9a6c-1d2e3f4a5b6c';
+    const first = await reply(customID);
+    expect(first.errors).toBeUndefined();
+    expect(first.data!.replyToMessage.messageID).toBe(customID);
+    const { data } = await run(env, clientOperation('getThreadFromID'), { threadID }, bob.row);
+    expect(data!.userThread.emails.map((e: any) => e.id)).toEqual([messageID, customID]);
+
+    // An ID already in use, or one that is not a UUID (it ends up in the Message-ID header), gets a fresh one.
+    for (const bad of [customID, 'x>\r\nBcc: victim@example.com']) {
+      const result = await reply(bad);
+      expect(result.errors).toBeUndefined();
+      expect(result.data!.replyToMessage.messageID).not.toBe(bad);
+      expect(result.data!.replyToMessage.messageID).toMatch(/^[0-9a-f-]{36}$/);
+    }
+  });
+
   it('moves threads between mailboxes and tracks read state', async () => {
     const env = await createTestEnv();
     const alice = await addUser(env, 'alice@skiff.local');

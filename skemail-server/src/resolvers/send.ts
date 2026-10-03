@@ -25,6 +25,21 @@ interface Copy {
 
 const toAddress = (a: SendAddressRequest) => ({ address: normalizeAddress(a.address), name: a.name ?? null });
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * skemail-web renders a reply optimistically under an ID it picks (customMessageID) and drops that pending copy
+ * once an email with the same ID arrives from the server, so the stored email must carry that ID. It also ends
+ * up in the Message-ID header, hence the strict format check; anything else, or an ID already taken, gets a new one.
+ */
+function newEmailID(ctx: Context, customID?: string | null): string {
+  if (customID && UUID.test(customID)) {
+    const id = customID.toLowerCase();
+    if (!ctx.db.prepare('SELECT 1 FROM emails WHERE email_id = ?').get(id)) return id;
+  }
+  return randomUUID();
+}
+
 /**
  * Stores one copy of the email per participant: the sender gets it under SENT, every recipient that has
  * an account here gets it under INBOX. Each copy carries the session key the client encrypted for that
@@ -35,7 +50,8 @@ async function deliver(
   ctx: Context,
   message: SendEmailRequest,
   existingThreadID: string | null,
-  inReplyTo: string | null = null
+  inReplyTo: string | null = null,
+  customMessageID: string | null = null
 ) {
   const sender = requireUser(ctx);
   const fromAddress = normalizeAddress(message.from.address);
@@ -93,7 +109,7 @@ async function deliver(
     }))
   );
 
-  const emailID = randomUUID();
+  const emailID = newEmailID(ctx, customMessageID);
   const threadID = existingThreadID ?? randomUUID();
   const createdAt = now();
   const messageId = `<${emailID}@${fromAddress.split('@')[1]}>`;
@@ -144,7 +160,7 @@ export const sendResolvers = {
       const threadID = findThreadIDForEmail(ctx.db, user.user_id, message.replyID);
       if (!threadID) throw new GraphQLError(`Unknown email ${message.replyID}`, { extensions: { code: 'NOT_FOUND' } });
       const inReplyTo = getEmailRow(ctx.db, user.user_id, message.replyID)?.message_id ?? null;
-      return deliver(ctx, message, threadID, inReplyTo);
+      return deliver(ctx, message, threadID, inReplyTo, message.customMessageID);
     }
   }
 };
