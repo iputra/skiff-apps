@@ -1,0 +1,65 @@
+# skemail-server + skemail-web behind a reverse proxy (e.g. Nginx Proxy Manager on the external `service-net`
+# network). Deployment values come from `.env` next to this file; see `.env.example`.
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.skemail
+      target: server
+    image: skemail-server:local
+    container_name: skemail-server
+    environment:
+      # Apollo: no stack traces in error responses, no schema introspection.
+      NODE_ENV: production
+      PORT: 4000
+      PUBLIC_URL: ${SKEMAIL_API_URL:?set SKEMAIL_API_URL in .env}
+      CORS_ORIGINS: ${SKEMAIL_WEB_URL:?set SKEMAIL_WEB_URL in .env}
+      DATA_DIR: /data
+      COOKIE_SECURE: "true"
+      MAIL_DOMAINS: ${MAIL_DOMAINS:?set MAIL_DOMAINS in .env}
+      MAIL_HOSTNAME: ${MAIL_HOSTNAME:?set MAIL_HOSTNAME in .env}
+      SMTP_PORT: 2525
+      OUTBOUND_ENABLED: ${OUTBOUND_ENABLED:-true}
+      MTA_STS_MODE: ${MTA_STS_MODE:-testing}
+      # Accounts allowed to create other accounts (provisionSrp).
+      ADMIN_USERS: ${ADMIN_USERS:-}
+    # Secrets (LINK_SECRET) and local overrides; not committed.
+    env_file:
+      - path: ./skemail-server/.env
+        required: false
+    volumes:
+      - skemail-data:/data
+    ports:
+      # Public MX: host port 25 -> SMTP inside the container.
+      - "25:2525"
+      - "127.0.0.1:4000:4000"
+    restart: unless-stopped
+    networks:
+      - default
+      - service-net
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.skemail
+      target: web
+      args:
+        SKEMAIL_API_BASE_URL: ${SKEMAIL_API_URL:?set SKEMAIL_API_URL in .env}
+    image: skemail-web:local
+    container_name: skemail-web
+    depends_on:
+      - server
+    ports:
+      - "127.0.0.1:4200:80"
+    restart: unless-stopped
+    networks:
+      - default
+      - service-net
+
+volumes:
+  skemail-data:
+    name: ${SKEMAIL_DATA_VOLUME:-skemail-data}
+
+networks:
+  service-net:
+    external: true

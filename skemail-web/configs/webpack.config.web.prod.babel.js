@@ -76,6 +76,8 @@ export default merge(baseConfig, {
       START_MINIMIZED: false,
       E2E_BUILD: false,
       APPNAME: null,
+      SKEMAIL_API_BASE_URL: null,
+      SKIP_RELAY_PROXY: true,
       LD_CLIENT_SIDE_ID: null,
       HCAPTCHA_SITE_KEY: null,
       PASSIVE_HCAPTCHA_SITE_KEY: null
