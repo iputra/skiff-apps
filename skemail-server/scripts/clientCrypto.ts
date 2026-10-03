@@ -68,14 +68,17 @@ export async function createAccountMaterial(password: string) {
   };
 }
 
-/** Client half of SRP login, mirroring skemail-web/src/utils/loginUtils.ts. */
-export async function srpLogin(
+/**
+ * The step-2 request for a step-1 response, as skemail-web's getLoginSrpRequest builds it (also what password
+ * confirmation dialogs send along with an action).
+ */
+export async function srpStep2Request(
   username: string,
   password: string,
-  call: (step: Record<string, unknown>) => Promise<Record<string, unknown>>
+  step1: { salt?: unknown; serverEphemeralPublic?: unknown },
+  tokenMFA?: string
 ) {
   const clientEphemeral = srp.generateEphemeral();
-  const step1 = await call({ step: 1, username });
   const salt = step1.salt as string;
   const masterSecret = await deriveMasterSecret(password, salt);
   const session = srp.deriveSession(
@@ -85,12 +88,36 @@ export async function srpLogin(
     username,
     createSRPKey(masterSecret, salt)
   );
-  const step2 = await call({
-    step: 2,
+  return {
+    request: {
+      step: 2,
+      username,
+      clientSessionProof: session.proof,
+      clientEphemeralPublic: clientEphemeral.public,
+      ...(tokenMFA ? { tokenMFA } : {})
+    },
+    clientEphemeral,
+    session,
+    masterSecret,
+    salt
+  };
+}
+
+/** Client half of SRP login, mirroring skemail-web/src/utils/loginUtils.ts. */
+export async function srpLogin(
+  username: string,
+  password: string,
+  call: (step: Record<string, unknown>) => Promise<Record<string, unknown>>,
+  tokenMFA?: string
+) {
+  const step1 = await call({ step: 1, username });
+  const { request, clientEphemeral, session, masterSecret, salt } = await srpStep2Request(
     username,
-    clientSessionProof: session.proof,
-    clientEphemeralPublic: clientEphemeral.public
-  });
+    password,
+    step1,
+    tokenMFA
+  );
+  const step2 = await call(request);
   if (step2.status !== 'AUTHENTICATED') return { step2, privateUserData: null };
   srp.verifySession(clientEphemeral.public, session, step2.serverSessionProof as string);
   const privateUserData = decryptSymmetric(

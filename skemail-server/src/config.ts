@@ -16,6 +16,8 @@ export interface Config {
   linkSecret: string;
   mail: MailConfig;
   sendLimits: SendLimits;
+  /** Accounts (usernames) allowed to create other accounts through provisionSrp; empty means nobody. */
+  adminUsers: string[];
 }
 
 export interface MailConfig {
@@ -87,7 +89,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       maxRecipientsPerMessage: Number(env.SEND_MAX_RECIPIENTS ?? 50),
       perHour: Number(env.SEND_LIMIT_PER_HOUR ?? 50),
       perDay: Number(env.SEND_LIMIT_PER_DAY ?? 200)
-    }
+    },
+    adminUsers: (env.ADMIN_USERS ?? '')
+      .split(',')
+      .map((u) => u.trim().toLowerCase())
+      .filter(Boolean)
   };
 }
 

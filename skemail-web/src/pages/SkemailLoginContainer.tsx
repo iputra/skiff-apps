@@ -43,6 +43,9 @@ export function SkemailLoginContainer() {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  // Set once the server asks for a second factor (TOTP code or backup code).
+  const [tokenNeeded, setTokenNeeded] = useState(false);
+  const [tokenMFA, setTokenMFA] = useState('');
   const { navigateToInbox } = useNavigate();
 
   const { isLoggedIn, isCachedLoginDone } = useFetchCurrentUser();
@@ -54,8 +57,17 @@ export function SkemailLoginContainer() {
     setError('');
     setLoading(true);
     const { loginServerSRP } = await import('../utils/loginUtils');
-    const { user, error: loginError } = await loginServerSRP(username, password);
+    const {
+      user,
+      error: loginError,
+      tokenNeeded: needsToken
+    } = await loginServerSRP(username, password, tokenNeeded ? tokenMFA.trim() : undefined);
 
+    if (needsToken) {
+      setTokenNeeded(true);
+      setLoading(false);
+      return null;
+    }
     if (!user || loginError) {
       setError(loginError ?? 'User not found.');
       setLoading(false);
@@ -108,6 +120,19 @@ export function SkemailLoginContainer() {
                 value={password}
               />
             </InputFieldContainer>
+            {tokenNeeded && (
+              <InputFieldContainer>
+                <InputField
+                  autoFocus
+                  dataTest='login-mfa-input'
+                  onChange={(e) => setTokenMFA(e.target.value)}
+                  onKeyPress={submitOnEnter}
+                  placeholder='6-digit code or backup code'
+                  size={Size.LARGE}
+                  value={tokenMFA}
+                />
+              </InputFieldContainer>
+            )}
             <Button dataTest='login-submit' fullWidth onClick={() => void login()}>
               Login
             </Button>

@@ -11,15 +11,28 @@ import { DB, fromJSON, now, toJSON } from './db';
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const SRP_CHALLENGE_TTL_MS = 5 * 60 * 1000;
 
-export function createSession(db: DB, userID: string): string {
+/** Symmetric key for skiff-crypto's secretbox (32 bytes, standard base64). */
+const newCacheKey = () => randomBytes(32).toString('base64');
+
+export function createSession(db: DB, userID: string): { sessionID: string; cacheKey: string } {
   const sessionID = randomBytes(32).toString('base64url');
-  db.prepare('INSERT INTO sessions (session_id, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)').run(
-    sessionID,
-    userID,
-    now(),
-    new Date(Date.now() + SESSION_TTL_MS).toISOString()
-  );
-  return sessionID;
+  const cacheKey = newCacheKey();
+  db.prepare(
+    'INSERT INTO sessions (session_id, user_id, created_at, expires_at, cache_key) VALUES (?, ?, ?, ?, ?)'
+  ).run(sessionID, userID, now(), new Date(Date.now() + SESSION_TTL_MS).toISOString(), cacheKey);
+  return { sessionID, cacheKey };
+}
+
+/** Session cache key for a session; sessions created before cache keys existed get one on first use. */
+export function getSessionCacheKey(db: DB, sessionID: string): string | null {
+  const row = db.prepare('SELECT cache_key FROM sessions WHERE session_id = ?').get(sessionID) as
+    | { cache_key: string | null }
+    | undefined;
+  if (!row) return null;
+  if (row.cache_key) return row.cache_key;
+  const cacheKey = newCacheKey();
+  db.prepare('UPDATE sessions SET cache_key = ? WHERE session_id = ?').run(cacheKey, sessionID);
+  return cacheKey;
 }
 
 export function getSessionUserID(db: DB, sessionID: string): string | null {
@@ -37,6 +50,46 @@ export function saveSrpChallenge(db: DB, username: string, serverSecretEphemeral
   db.prepare(
     'INSERT OR REPLACE INTO srp_challenges (username, server_secret_ephemeral, expires_at) VALUES (?, ?, ?)'
   ).run(username, serverSecretEphemeral, new Date(Date.now() + SRP_CHALLENGE_TTL_MS).toISOString());
+}
+
+/** How long a passed SRP proof can be checked again (see srp_verified in 005_mfa.sql). */
+const SRP_VERIFIED_TTL_MS = 5 * 60 * 1000;
+
+export function recordSrpVerified(
+  db: DB,
+  username: string,
+  clientEphemeralPublic: string,
+  clientSessionProof: string,
+  serverSessionProof: string
+) {
+  db.prepare('DELETE FROM srp_verified WHERE expires_at < ?').run(now());
+  db.prepare(
+    `INSERT OR REPLACE INTO srp_verified
+       (username, client_ephemeral_public, client_session_proof, server_session_proof, expires_at)
+     VALUES (?, ?, ?, ?, ?)`
+  ).run(
+    username,
+    clientEphemeralPublic,
+    clientSessionProof,
+    serverSessionProof,
+    new Date(Date.now() + SRP_VERIFIED_TTL_MS).toISOString()
+  );
+}
+
+/** The server proof for an SRP proof that already passed and has not expired, or null. */
+export function findSrpVerified(
+  db: DB,
+  username: string,
+  clientEphemeralPublic: string,
+  clientSessionProof: string
+): string | null {
+  const row = db
+    .prepare(
+      `SELECT server_session_proof FROM srp_verified
+        WHERE username = ? AND client_ephemeral_public = ? AND client_session_proof = ? AND expires_at > ?`
+    )
+    .get(username, clientEphemeralPublic, clientSessionProof, now()) as { server_session_proof: string } | undefined;
+  return row?.server_session_proof ?? null;
 }
 
 /** Returns and consumes the pending challenge, so each step-1 response can be used once. */

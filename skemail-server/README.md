@@ -8,11 +8,12 @@ Server ini **hanya menyimpan ciphertext**. Semua enkripsi dan dekripsi tetap ter
 
 | Area | Operasi |
 |---|---|
-| Login | `loginSrp` (SRP 2 langkah, sesi via cookie), `provisionSrp`, `updateSrp` |
+| Login | `loginSrp` (SRP 2 langkah, sesi via cookie), `sessionCache` (login bertahan setelah reload), `updateSrp` (wajib password lama), `provisionSrp` (hanya akun di `ADMIN_USERS`, hanya untuk domain di `MAIL_DOMAINS`) |
+| 2FA | TOTP (Google Authenticator, Authy, dll.) dan 10 backup code sekali pakai: `enrollMfa`, `disableMfa`, `regenerateMfaBackupCodes`, `User.mfa`. Kode TOTP tidak bisa dipakai dua kali; 5 kode salah mengunci pengecekan 15 menit. Lihat [Cara kerja](#cara-kerja). |
 | User | `currentUser`, `user`, `users`, `usersFromEmailAlias(WithCatchall)`, `aliasDisplayInfo`, `fullAliasInfo`, `userPreferences` / `setUserPreferences`, `setDefaultEmailAlias`, `decryptionServicePublicKey` |
 | Mailbox | `mailbox` (label sistem / label user, pagination cursor, filter read), `userThread`, `userThreads`, `unread`, `unreadAllLabels`, `numMailboxThreads`, `filteredThreadIDs` |
 | Aksi thread | `setReadStatus`, `setAllThreadsReadStatus`, `applyLabels` / `removeLabels` (+ bulk), `bulkTrash`, `deleteThread`, `bulkDeleteTrashedThreads`, CRUD label user |
-| Kirim | `sendMessage`, `replyToMessage` antar user lokal, termasuk lampiran |
+| Kirim | `sendMessage`, `replyToMessage` antar user lokal, termasuk lampiran. Balasan memakai `customMessageID` dari client, jadi tidak tampil ganda. |
 | Lainnya | Draft (`allDrafts`, `createOrUpdateDraft`, `deleteDraft`), kontak, `attachments` + download lewat link bertanda tangan |
 | **Mail server** | Email **ke** dan **dari** server lain (Gmail, dll.): SMTP masuk (MX), pengiriman langsung ke MX penerima dengan DKIM, antrean + retry, bounce, threading lewat `Message-ID` / `In-Reply-To`. Lihat [Email ke dan dari luar](#email-ke-dan-dari-luar). |
 
@@ -26,8 +27,22 @@ Log ini bisa dipakai sebagai daftar pekerjaan berikutnya.
 
 ### Belum ada
 - `scheduleSendAt` disimpan, tapi email langsung dikirim.
-- MFA, billing, custom domain, import, organisasi/tim, dan dokumen (semuanya masih stub).
-- Tidak ada signup di skemail-web, jadi akun dibuat dengan skrip seed.
+- Kunci keamanan fisik (WebAuthn/passkey), billing, custom domain, import, organisasi/tim, dan dokumen (semuanya masih stub). Tombol "Add hardware key" di Settings belum berfungsi.
+- Menambah address ke akun sendiri (`createEmailAlias`) belum ada.
+- Tidak ada signup di skemail-web, jadi akun dibuat dengan skrip seed. Form tambah anggota di Settings → Organization bergantung pada dokumen/organisasi yang masih stub.
+
+## Menjalankan dengan Docker
+
+`Dockerfile.skemail` (target `server` dan `web`) dan `docker-compose.yml` di root repo menjalankan server dan web (build production, disajikan nginx) di belakang reverse proxy:
+
+```bash
+cp .env.example .env                       # isi domain, URL web/API, MX host, ADMIN_USERS
+docker compose build
+docker compose run --rm server yarn seed:server "nama@example.com:password:Nama"
+docker compose up -d
+```
+
+Port 25 host diteruskan ke SMTP container. Web (`127.0.0.1:4200`) dan API (`127.0.0.1:4000`) diarahkan oleh reverse proxy, misalnya Nginx Proxy Manager lewat network `service-net`. `SKEMAIL_API_URL` ikut dibakar ke bundle web saat build.
 
 ## Menjalankan
 

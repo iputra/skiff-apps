@@ -9,6 +9,7 @@ import { authResolvers } from './resolvers/auth';
 import { contactResolvers } from './resolvers/contacts';
 import { draftResolvers } from './resolvers/drafts';
 import { mailboxResolvers } from './resolvers/mailbox';
+import { mfaResolvers } from './resolvers/mfa';
 import { sendResolvers } from './resolvers/send';
 import { userResolvers } from './resolvers/user';
 import { scalarResolvers } from './scalars';
@@ -20,6 +21,7 @@ type ResolverMap = Record<string, Record<string, unknown>>;
 
 const resolverModules: ResolverMap[] = [
   authResolvers,
+  mfaResolvers,
   userResolvers,
   mailboxResolvers,
   sendResolvers,
