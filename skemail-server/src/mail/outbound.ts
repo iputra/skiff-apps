@@ -24,6 +24,7 @@ import {
   MailTextDatagram
 } from './datagrams';
 import { dkimSignMessage, loadDkimKey } from './dkim';
+import { formatOutboundHtml, htmlToPlainText } from './format';
 import { ingestMime, isLocalDomain, SERVER_KEY_NAME } from './ingest';
 import {
   daneMatches,
@@ -121,8 +122,10 @@ function renderMime(db: DB, config: Config, job: QueueRow) {
     fromJSON<PublicKey>(job.external_session_key_by_json, { key: '' })
   );
   const subject = decrypt<{ subject: string }>(MailSubjectDatagram, sessionKey, email.encrypted_subject).subject;
-  const text = decrypt<{ text: string }>(MailTextDatagram, sessionKey, email.encrypted_text).text;
-  const html = decrypt<{ html: string }>(MailHtmlDatagram, sessionKey, email.encrypted_html).html;
+  const clientText = decrypt<{ text: string }>(MailTextDatagram, sessionKey, email.encrypted_text).text;
+  const clientHtml = decrypt<{ html: string }>(MailHtmlDatagram, sessionKey, email.encrypted_html).html;
+  const html = clientHtml ? formatOutboundHtml(clientHtml) : clientHtml;
+  const text = html ? htmlToPlainText(html) : clientText;
   const attachments = listAttachmentRows(db, job.sender_user_id, job.email_id).map((a) => {
     const meta = decrypt<AttachmentMetadata>(AttachmentMetadataDatagram, sessionKey, a.encrypted_metadata);
     const content = decrypt<{ content: string }>(
